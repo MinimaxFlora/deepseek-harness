@@ -172,10 +172,21 @@ if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, truste
 ### 3. `/api` 的 Host 信任围栏
 
 围栏信任：①回环地址、②**本进程网卡**采到的 IPv4 字面量、③显式声明的 authority（`host:port`
-精确匹配，或**不带端口匹配任意端口**）。容器里 ② 只有 `172.17.x.x`，浏览器发来的是宿主机地址或
-域名，所以入口脚本把 `HTTPS_ACCESS_HOST` 和 `DSH_TRUSTED_HOSTS` 一起作为 `--trusted-host` 传入。
+精确匹配，或**不带端口匹配任意端口**）。容器里 ② 只有 `172.17.x.x`，而浏览器发来的是域名或
+宿主机/公网 IP —— 一旦你访问的地址和 `HTTPS_ACCESS_HOST` 不一致，**页面能打开、但所有 `/api`
+请求返回 403**（界面表现为「加载提供方目录失败：llm/listProviders failed: HTTP 403」）。
 
-未声明的 authority 会被 403（这层必须留：它防的是 DNS rebinding）。
+镜像默认的处理方式：**入口把上游 Host 归一化成回环**（`header_up Host 127.0.0.1:3080`，同时
+去掉 Origin），这样浏览器输什么地址都能用：
+
+- 归一化只发生在这条容器内部的 Caddy→dsh 链路上，而 `dsh` 的 3080 **不对外发布**，所以
+  直接打到 3080 的请求仍然走完整围栏，DNS rebinding 防护没有削弱；
+- 跨站攻击仍被 `SameSite=Strict` 的认证 cookie 拦在门外；
+- 想恢复上游原样行为（只认回环 + 容器 IP + 你声明的 authority）：`DSH_STRICT_HOST_FENCE=1`，
+  此时必须保证 `HTTPS_ACCESS_HOST` / `DSH_TRUSTED_HOSTS` 与浏览器地址完全一致。
+
+> 切换这个开关会换掉 cookie 的绑定 authority，切完需要重新打开一次带 token 的地址
+> （`dsh-harness url` 会直接打印一个可用的登录链接）。
 
 ---
 
@@ -215,7 +226,8 @@ if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, truste
 | `DSH_HTTPS` | `1` | `0` = 不起 Caddy，只跑 dsh（3080） |
 | `DSH_HOME` | `/data/dsh` | 数据根目录 |
 | `DSH_PORT` / `DSH_HOST` | `3080` / `0.0.0.0` | 容器内监听端口与绑定地址（`127.0.0.1` 可只留给 Caddy） |
-| `DSH_TRUSTED_HOSTS` | 空 | 额外信任的 authority，逗号分隔（再套一层反代时用） |
+| `DSH_TRUSTED_HOSTS` | 空 | 额外信任的 authority，逗号分隔（仅 `DSH_STRICT_HOST_FENCE=1` 时需要） |
+| `DSH_STRICT_HOST_FENCE` | `0` | `1` = 不归一化 Host，完全按上游围栏（只认回环/容器 IP/声明的 authority） |
 | `DSH_TELEMETRY_DISABLED` | `1` | 关掉遥测 |
 | `DEEPSEEK_API_KEY` 等 | 空 | provider 凭据预置（见下节） |
 | `DSH_NODE_FLAGS` | `--expose-internals` | 传给 node 的参数；默认值就是 harness 的 HMR 链需要的那个 flag |

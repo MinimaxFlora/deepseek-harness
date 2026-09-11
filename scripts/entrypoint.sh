@@ -130,7 +130,21 @@ write_caddyfile() {
 			echo '	}'
 		fi
 		echo "	reverse_proxy 127.0.0.1:${DSH_PORT} {"
-		echo '		header_up Host {host}'
+		if [ "${DSH_STRICT_HOST_FENCE:-0}" = "1" ]; then
+			echo '		header_up Host {host}'
+		else
+			# 默认把上游 Host 归一化成回环，并去掉 Origin。
+			#
+			# 为什么：/api 的信任围栏只接受 ①回环地址 ②本进程网卡的 IPv4 字面量
+			# ③显式声明的 authority。容器只有一个 172.x 网卡，而浏览器用的是域名或
+			# 宿主机/公网 IP —— 一旦用户访问的地址和 HTTPS_ACCESS_HOST 不一致，页面能开
+			# 但所有 /api 请求都 403（模型页报 “llm/listProviders failed: HTTP 403”）。
+			# Caddy 是唯一入口（dsh 的 3080 不对外发布），所以这里归一化来源；
+			# 直接打到 3080 的请求仍走完整围栏，DNS rebinding 防护不受影响。
+			# 想过上游原样行为：DSH_STRICT_HOST_FENCE=1
+			echo "		header_up Host 127.0.0.1:${DSH_PORT}"
+			echo '		header_up -Origin'
+		fi
 		echo '	}'
 		echo '	log {'
 		echo '		output stdout'
@@ -199,6 +213,11 @@ for th in $(printf '%s' "$HOSTS" | tr ',' ' '); do
 	[ -n "$th" ] && set -- "$@" --trusted-host "$th"
 done
 log "dsh fence authorities: ${HOSTS:-none} (plus loopback and this container's IPs)"
+if [ "${DSH_STRICT_HOST_FENCE:-0}" != "1" ]; then
+	log "host fence: Caddy normalises the upstream Host to loopback, so any address you type works"
+else
+	log "host fence: STRICT — only loopback, container IPs and the authorities above are accepted"
+fi
 
 # Escape hatch for anything the web app grows later.
 # shellcheck disable=SC2086

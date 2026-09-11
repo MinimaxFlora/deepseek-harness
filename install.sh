@@ -255,7 +255,7 @@ check_env() {
 	command -v tar  >/dev/null 2>&1 || die "缺少 tar"
 	mkdir -p "$DSH_INSTALL_DIR"
 	TMP_DIR=$(mktemp -d)
-	trap 'rm -rf "$TMP_DIR"; printf "\033[?25h"' EXIT INT TERM
+	trap 'rm -rf "$TMP_DIR"; printf "\033[?25h\033[?1049l"' EXIT INT TERM
 	setup_input
 }
 
@@ -624,7 +624,16 @@ wait_healthy() {
 	return 1
 }
 
-token_url() { docker logs "$DSH_CONTAINER" 2>&1 | sed -n 's/.*(LAN: \(http[^)]*\)).*/\1/p' | tail -1; }
+token_url() { # 从日志取 token，并换成「你实际能打开的」部署地址（容器内的 172.x 地址对用户没用）
+	local raw
+	raw=$(docker logs "$DSH_CONTAINER" 2>&1 | sed -n 's/.*token=\([^ )]*\).*/\1/p' | head -1)
+	[ -z "$raw" ] && return 1
+	if [ "${DSH_DEPLOY_MODE:-}" = "domain" ] || [ "$TLS_MODE" = "acme" ]; then
+		echo "https://${DSH_HOST}/?token=${raw}"
+	else
+		echo "https://${DSH_HOST}:${DSH_HTTPS_PORT}/?token=${raw}"
+	fi
+}
 
 entry_url() {
 	if [ "${DSH_DEPLOY_MODE:-}" = "domain" ] || [ "$TLS_MODE" = "acme" ]; then
@@ -647,7 +656,7 @@ show_url() {
 	t=$(token_url)
 	if [ -n "$t" ]; then
 		panel_row "首次登录" "${FG_W}${t}${RST}"
-		panel_note "打开一次这个带 token 的地址即可换到持久 cookie，之后直接用上面的入口"
+		panel_note "打开一次这个地址即可换到持久 cookie（token 每次重启都会变），之后直接用上面的入口"
 	else
 		panel_note "带 token 的地址还没出现在日志里，稍后执行：dsh-harness url"
 	fi
@@ -835,19 +844,18 @@ MENU_ACTIONS=(install status url logs config update service backup uninstall qui
 
 MENU_LINES=0
 
-menu_block() { # 画整块菜单；每行前置 \033[K 清行，重绘时不会有残影
+menu_block() { # 画整块菜单（紧凑标题版，菜单单独占屏，避免任何光标行数推算）
 	local i name hint
-	printf '\033[K  %s╭─%s %sDEEPSEEK HARNESS%s %s· 管理菜单%s\n' "$FG_D" "$RST" "$BOLD$FG_C" "$RST" "$DIM" "$RST"
+	printf '  %s╭─%s %sDEEPSEEK HARNESS%s %s· 管理菜单%s\n' "$FG_D" "$RST" "$BOLD$FG_C" "$RST" "$DIM" "$RST"
 	for i in "${!MENU_NAMES[@]}"; do
 		name="${MENU_NAMES[$i]}"; hint="${MENU_HINTS[$i]}"
 		if [ "$i" -eq "$1" ]; then
-			printf '\033[K  %s│%s  %s %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$CUR" "$FG_M" "$(pad "$name" 18)" "$RST" "$DIM" "$hint" "$RST"
+			printf '  %s│%s  %s %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$CUR" "$FG_M" "$(pad "$name" 18)" "$RST" "$DIM" "$hint" "$RST"
 		else
-			printf '\033[K  %s│%s    %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$FG_W" "$(pad "$name" 18)" "$RST" "$FG_D" "$hint" "$RST"
+			printf '  %s│%s    %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$FG_W" "$(pad "$name" 18)" "$RST" "$FG_D" "$hint" "$RST"
 		fi
 	done
-	printf '\033[K  %s╰%s%s\n' "$FG_D" "$(rule 58)" "$RST"
-	MENU_LINES=$((${#MENU_NAMES[@]} + 2))   # 标题 + 条目 + 收尾
+	printf '  %s╰%s%s\n' "$FG_D" "$(rule 58)" "$RST"
 }
 
 menu() {
@@ -858,10 +866,12 @@ menu() {
 		log_dim "无交互终端：请用子命令 dsh-harness install|status|logs|config|update|..."
 		return 0
 	fi
-	printf '\n'
+	# 备用屏幕缓冲区：菜单独占一屏、每次整屏重绘，退出时终端原样恢复
+	[ "$IS_TTY" = 1 ] && printf '\033[?1049h'
 	while true; do
+		printf '\033[2J\033[H'
 		menu_block "$sel"
-		printf '\033[K  %s↑↓/jk 选择 · Enter 确认 · 数字直选 · q 退出%s ' "$DIM" "$RST" >&2
+		printf '  %s↑↓/jk 选择 · Enter 确认 · 数字直选 · q 退出%s ' "$DIM" "$RST" >&2
 		IFS= read -r -s -n1 -u "$TTY_FD" key || key=q
 
 		# 先只决定「改选中」还是「执行」，方向键/移动键一律不执行动作
@@ -882,7 +892,7 @@ menu() {
 				esac ;;
 			j|J) act=0; sel=$(((sel + 1) % n)) ;;
 			k|K) act=0; sel=$(((sel - 1 + n) % n)) ;;
-			q|Q) printf '\n\n'; exit 0 ;;
+			q|Q) printf '\n'; exit 0 ;;
 			'')  act=1 ;;                       # 回车：执行当前项
 			[1-9]|0)
 				if [ "$key" = "0" ]; then i=9; else i=$((key - 1)); fi
@@ -890,8 +900,6 @@ menu() {
 			*)   act=0 ;;
 		esac
 
-		# 无论继续选还是执行动作，都先回到菜单块首并清掉整块
-		printf '\033[%dA\033[J' "$MENU_LINES"
 		if [ "$act" = "1" ]; then
 			printf '\n'
 			run_menu_action "${MENU_ACTIONS[$sel]}"
