@@ -11,8 +11,8 @@ name: docker-publish
 # fails loudly instead of shipping an image whose settings page is broken.
 #
 # Docker Hub credentials are OPTIONAL: without DOCKERHUB_USERNAME /
-# DOCKERHUB_TOKEN the run still builds and smoke-tests, so a fresh clone is green
-# before any secret exists. Add both and the same run pushes.
+# DOCKERHUB_TOKEN the run builds and smoke-tests only, so a fresh clone is green
+# before any secret exists. Add both and the same run also pushes.
 #
 # Action refs are pinned to published major tags — these actions have no `main`
 # branch, so `@main` fails to resolve.
@@ -61,6 +61,10 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # buildx refuses `--load` together with `--push`, and the smoke test must run
+      # on THIS build rather than on whatever the tag resolves to in the registry —
+      # so the image is always loaded locally here, and the push happens later as a
+      # plain `docker push` (layers are already cached).
       - name: Build image
         uses: docker/build-push-action@v7
         with:
@@ -80,11 +84,13 @@ jobs:
 
       # Boot the image the way the compose file does (read-only rootfs, tmpfs
       # /tmp) and assert the two behaviours this image exists for: the webserver
-      # binds all interfaces, and the client-side loopback gate is gone. This is
-      # what catches an upstream bump that changes the bundle.
+      # binds all interfaces, and the client-side loopback gate is gone while the
+      # /api fence survives. Assertions read the files inside the container, so a
+      # reworded log line cannot turn this red.
       - name: Smoke test the boot
         run: |
           set -euo pipefail
+          TAG="${{ steps.ver.outputs.version }}"
           mkdir -p "$RUNNER_TEMP/dsh-data/dsh" "$RUNNER_TEMP/dsh-data/caddy"
           docker run -d --name dsh-ci \
             --read-only --tmpfs /tmp:mode=1777,size=256m \
@@ -92,20 +98,28 @@ jobs:
             -e HTTPS_ACCESS_HOST=127.0.0.1 \
             -v "$RUNNER_TEMP/dsh-data/dsh:/data/dsh" \
             -v "$RUNNER_TEMP/dsh-data/caddy:/data/caddy" \
-            "$IMAGE:${{ steps.ver.outputs.version }}"
+            "$IMAGE:$TAG"
+          echo "image under test: $IMAGE:$TAG ($(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG" | cut -c1-19))"
+          status=starting
           for _ in $(seq 1 40); do
-            status=$(docker inspect --format '{{.State.Health.Status}}' dsh-ci 2>/dev/null || echo starting)
+            status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' dsh-ci 2>/dev/null || echo missing)
             [ "$status" = "healthy" ] && break
             sleep 5
           done
-          docker logs dsh-ci 2>&1 | tail -20
+          docker logs dsh-ci 2>&1 | grep -E '\[entrypoint\]|client patch|dsh web:' || true
           echo "health=$status"
           [ "$status" = "healthy" ] || { echo "::error::container never became healthy"; exit 1; }
+
           docker exec dsh-ci ss -lntp | grep -q '0.0.0.0:3080' \
             || { echo "::error::webserver is not bound to all interfaces"; exit 1; }
-          docker logs dsh-ci 2>&1 | grep -q 'client patch: in place' \
-            || { echo "::error::client-side loopback gate was not patched"; exit 1; }
-          echo "smoke test passed: bound 0.0.0.0:3080 with the client gate patched"
+
+          client=$(docker exec dsh-ci sh -c 'find /usr/local/lib/node_modules -path "*/@deepseek-ai/dsh-client-connection/lib/client.js" -print -quit')
+          [ -n "$client" ] || { echo "::error::client bundle not found in the image"; exit 1; }
+          docker exec dsh-ci grep -q 'isLoopback: .*|| true,' "$client" \
+            || { echo "::error::client-side loopback gate is not patched ($client)"; exit 1; }
+          docker exec dsh-ci grep -q 'isLoopbackHostname(hostUrl.hostname)' "${client%/*}/index.js" \
+            || { echo "::error::the /api Host fence is missing"; exit 1; }
+          echo "smoke test passed: healthy, bound 0.0.0.0:3080, client gate patched, /api fence intact"
 
       - name: Log in to Docker Hub
         if: steps.mode.outputs.push == 'true'
