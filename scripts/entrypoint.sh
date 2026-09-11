@@ -150,16 +150,26 @@ if [ "$DSH_HTTPS" = "1" ]; then
 	fi
 	caddy run --config "$CADDYFILE" --adapter caddyfile >>/dev/stdout 2>&1 &
 	CADDY_PID=$!
+	# ACME 模式下 Caddy 直接用 443，内部 CA 模式下监听 HTTPS_PORT
+	PROBE_PORT="$HTTPS_PORT"
+	if [ "$TLS_MODE" = "acme" ] && [ -n "$HTTPS_ACCESS_HOST" ]; then
+		PROBE_PORT=443
+	fi
 	i=0
 	while [ "$i" -lt 40 ]; do
-		code=$(curl -k -sS -o /dev/null -m 2 -w '%{http_code}' "https://127.0.0.1:${HTTPS_PORT}/" 2>/dev/null || echo 000)
+		code=$(curl -k -sS -o /dev/null -m 2 -w '%{http_code}' "https://127.0.0.1:${PROBE_PORT}/" 2>/dev/null || true)
+		[ -z "$code" ] && code=000
 		case "$code" in
 			000) i=$((i + 1)); sleep 0.5 ;;
-			*) log "caddy ready on :${HTTPS_PORT} (first response ${code})"; break ;;
+			*) log "caddy ready on :${PROBE_PORT} (first response ${code})"; break ;;
 		esac
 	done
 	if [ "$i" -ge 40 ]; then
-		log "WARNING: caddy did not answer on :${HTTPS_PORT} within 20s"
+		if [ "$TLS_MODE" = "acme" ] && [ -n "$HTTPS_ACCESS_HOST" ]; then
+			log "note: :443 尚未完成 TLS 握手 —— ${HTTPS_ACCESS_HOST} 的证书可能还在申请中（域名未解析到本机时属正常，Caddy 会持续重试）"
+		else
+			log "WARNING: caddy did not answer on :${PROBE_PORT} within 20s"
+		fi
 	fi
 else
 	log "HTTPS front door disabled (DSH_HTTPS=$DSH_HTTPS); dsh is the only listener"
@@ -196,10 +206,12 @@ log "dsh fence authorities: ${HOSTS:-none} (plus loopback and this container's I
 
 log "starting: dsh $* (DSH_HOME=$DSH_HOME)"
 if [ "$DSH_HTTPS" = "1" ]; then
-	if [ -n "$HTTPS_ACCESS_HOST" ]; then
-		log "open: https://${HTTPS_ACCESS_HOST}:${HTTPS_PORT}/  (self-signed unless DSH_TLS_MODE=acme)"
+	if [ "$TLS_MODE" = "acme" ] && [ -n "$HTTPS_ACCESS_HOST" ]; then
+		log "open: https://${HTTPS_ACCESS_HOST}/   (Let's Encrypt via ACME — needs 80/443 reachable; first visit may wait a few seconds)"
+	elif [ -n "$HTTPS_ACCESS_HOST" ]; then
+		log "open: https://${HTTPS_ACCESS_HOST}:${HTTPS_PORT}/   (self-signed internal CA — the browser warns once)"
 	else
-		log "open: https://<this-host>:$HTTPS_PORT/  (set HTTPS_ACCESS_HOST to print the exact URL)"
+		log "open: https://<this-host>:$HTTPS_PORT/   (set HTTPS_ACCESS_HOST to print the exact URL)"
 	fi
 fi
 

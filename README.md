@@ -16,7 +16,49 @@ Basic Auth**，dsh 本体按局域网可用打好补丁，数据全部落在 `./
 
 ---
 
-## 快速开始
+## 一键脚本
+
+```sh
+# 交互菜单（推荐）：域名 / IP、端口、Basic Auth 全部向导式配置
+bash <(curl -fsSL https://raw.githubusercontent.com/MinimaxFlora/deepseek-harness/main/install.sh)
+
+# 或者先下载再跑
+curl -fsSLO https://raw.githubusercontent.com/MinimaxFlora/deepseek-harness/main/install.sh
+sudo bash install.sh
+```
+
+脚本会：检查环境 → 自动装 Docker（国内走私有源镜像）→ 向导式配置 → 拉镜像 → 启动 →
+等到 `healthy` 并打印访问地址与首次登录链接，并安装一个管理命令 `dsh-harness`
+（菜单 / 状态 / 日志 / 访问入口 / 重新配置 / 更新 / 备份 / 卸载）。
+
+```sh
+dsh-harness                 # 交互菜单
+dsh-harness status          # 运行状态
+dsh-harness config          # 改域名 / 端口 / Basic Auth 并重建
+dsh-harness url             # 打印 HTTPS 入口 + 带 token 的首次登录地址
+dsh-harness update          # 拉最新镜像并重建
+```
+
+**域名还是 IP？**
+
+| 选择 | 证书 | 端口 | 说明 |
+| --- | --- | --- | --- |
+| 填域名（推荐） | Let's Encrypt，容器内 Caddy 自动申请 | 映射 80 + 443 | 需要域名 A 记录指向本机公网 IP；脚本申请前会校验解析并提示 |
+| 不填 / 填 IP | 容器内部 CA 自签 | 默认映射 8443 | 内网直接可用，浏览器提示一次风险，继续即可 |
+
+用环境变量跳过向导：
+
+```sh
+DSH_DOMAIN=dsh.example.com DSH_ACME_EMAIL=me@example.com \
+DSH_AUTH_USERNAME=dsh DSH_AUTH_PASSWORD='强密码' \
+sudo -E bash install.sh install
+
+DSH_HOST=192.168.1.10 DSH_HTTPS_PORT=8443 sudo -E bash install.sh install   # 内网 IP + 自签
+```
+
+`.env` 里对应 `HTTPS_ACCESS_HOST`：**填域名 = 真证书，填 IP 或留空 = 自签**（留空时脚本自动探测本机 IP）。
+
+### 手动部署（不用脚本）
 
 ```sh
 git clone https://github.com/MinimaxFlora/deepseek-harness.git
@@ -224,6 +266,7 @@ docker compose restart deepseek-harness     # 插件变更需要重启 Loader �
 │                                  #   · 客户端单点修复（构建时 sed + 断言 /api 围栏仍在）
 │                                  #   · dsh 包装脚本（固定带 --expose-internals）
 ├── docker-compose.yml             # 单容器：8443 对外，read_only/tmpfs/no-new-privileges
+├── install.sh                     # 一键脚本：向导式安装 + 管理（域名/端口/Auth/更新/备份）
 ├── .env.example                   # 复制成 .env，改 HTTPS_ACCESS_HOST
 ├── scripts/entrypoint.sh          # 启动逻辑：生成 Caddyfile、起 Caddy + dsh、拼参数
 ├── README.md  LICENSE  .gitattributes  .dockerignore  .gitignore
