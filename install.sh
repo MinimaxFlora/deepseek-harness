@@ -9,7 +9,7 @@
 #    ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝
 #
 #   把 dsh 的官方 Web UI 装成一个容器：
-#     浏览器 --https--> 容器内 Caddy（TLS + 可选 Basic Auth）--> dsh web
+#     浏览器 --https--> 容器内 Caddy（TLS）--> dsh web（自带 token 认证）
 #
 #   · 域名模式：Caddy 自动申请 Let's Encrypt 证书（需要 80/443 可达）
 #   · IP 模式：不填域名就用本机内网 IP，Caddy 内部 CA 自签
@@ -27,13 +27,15 @@
 #   环境变量（跳过向导，适合自动化）：
 #     DSH_DOMAIN        域名，例如 dsh.example.com（留空 = 用本机 IP）
 #     DSH_HOST          显式指定访问地址（域名或 IP），优先级高于 DSH_DOMAIN
-#     DSH_AUTH_USERNAME / DSH_AUTH_PASSWORD   Basic Auth（两个都填才启用）
 #     DSH_ACME_EMAIL    Let's Encrypt 通知邮箱（域名模式建议填）
 #     DSH_HTTPS_PORT    IP 模式下的 HTTPS 端口，默认 8443
 #     DSH_TAG           镜像 tag，默认 latest
 #     DSH_IMAGE         镜像名，默认 dockorae/deepseek-harness
 #     DSH_INSTALL_DIR   安装目录，默认 /opt/deepseek-harness
 #     DSH_NO_MIRROR=1   强制直连拉镜像
+#
+#   关于认证：不做 Basic Auth。dsh 自带「进程 token + 持久 cookie」这套认证，
+#   首次用带 ?token= 的地址打开一次即可，之后直接访问站点根地址。
 #
 ###############################################################################
 
@@ -70,8 +72,6 @@ DSH_NETWORK="${DSH_NETWORK:-dsh-network}"
 DSH_HTTPS_PORT="${DSH_HTTPS_PORT:-8443}"
 DSH_DOMAIN="${DSH_DOMAIN:-}"
 DSH_HOST="${DSH_HOST:-}"
-DSH_AUTH_USERNAME="${DSH_AUTH_USERNAME:-}"
-DSH_AUTH_PASSWORD="${DSH_AUTH_PASSWORD:-}"
 DSH_ACME_EMAIL="${DSH_ACME_EMAIL:-}"
 DSH_MODE="ip"                       # ip | domain
 TLS_MODE="internal"                 # internal | acme
@@ -184,15 +184,6 @@ ask() { # ask <提示> <默认> -> $REPLY
 	REPLY="$answer"
 }
 
-ask_secret() {
-	local prompt="$1" default="${2:-}" answer=""
-	if [ -z "$TTY_FD" ]; then REPLY="$default"; return 0; fi
-	printf '  %s?%s %s ' "$FG_M" "$RST" "$prompt" >&2
-	read -r -s -u "$TTY_FD" answer || answer=""
-	printf '\n' >&2
-	[ -z "$answer" ] && answer="$default"
-	REPLY="$answer"
-}
 
 confirm() { # confirm <提示> [y=默认是]
 	local prompt="$1" hint='[y/N]' default="n" answer=""
@@ -300,15 +291,6 @@ resolve_domain_ip() {
 	printf '%s' "$ip"
 }
 
-gen_password() {
-	local pw=""
-	command -v openssl >/dev/null 2>&1 && pw=$(openssl rand -base64 18 2>/dev/null | tr -d '/+=' | cut -c1-16)
-	if [ -z "$pw" ] && command -v base64 >/dev/null 2>&1; then
-		pw=$(head -c 14 /dev/urandom | base64 | tr -d '/+=' | cut -c1-16)
-	fi
-	[ -z "$pw" ] && pw="dsh${RANDOM}${RANDOM}${RANDOM}"
-	printf '%s' "$pw"
-}
 
 port_busy() { # port_busy <端口>
 	if command -v ss >/dev/null 2>&1; then
@@ -355,10 +337,21 @@ ensure_docker() {
 }
 
 # ─────────────────────────── 配置向导 ───────────────────────────
+validate_host() { # 访问地址只接受域名或 IP，挡掉 http:// 前缀、路径、空格等
+	case "$1" in
+		*[!A-Za-z0-9.:_-]*) die "访问地址只能是域名或 IP（不要带 http:// 或路径）：$1" ;;
+	esac
+	[ -n "$1" ] || die "访问地址不能为空"
+	return 0
+}
+
 wizard() {
 	local lan pub
 	lan=$(detect_lan_ip)
 	pub=$(detect_public_ip || true)
+	# 从环境继承来的伪地址（镜像自身就用 DSH_HOST=0.0.0.0 表示监听地址）不算「用户指定」
+	case "$DSH_HOST" in 0.0.0.0|::|'*'|localhost) DSH_HOST="" ;; esac
+	case "$DSH_DOMAIN" in 0.0.0.0|::|'*'|localhost) DSH_DOMAIN="" ;; esac
 
 	panel_open "配置向导"
 	panel_blank
@@ -376,8 +369,8 @@ wizard() {
 		fi
 	else
 		panel_blank
-		printf '  %s│%s   %s1%s) 域名（推荐，Caddy 自动申请证书）\n' "$FG_D" "$RST" "$FG_G" "$RST"
-		printf '  %s│%s   %s2%s) 本机 IP（内网自签证书）\n' "$FG_D" "$RST" "$FG_G" "$RST"
+		printf '  %s│%s   %s1%s) 域名（Caddy 自动申请 Let'\''s Encrypt 证书）\n' "$FG_D" "$RST" "$FG_G" "$RST"
+		printf '  %s│%s   %s2%s) IP 访问（默认公网 IP，自签证书）\n' "$FG_D" "$RST" "$FG_G" "$RST"
 		ask "选择 [1/2]" "2"
 		case "$REPLY" in
 			1) DSH_MODE="domain" ;;
@@ -425,10 +418,16 @@ wizard() {
 		*)
 			if [ -z "$DSH_HOST" ]; then
 				panel_blank
-				if [ -n "$lan" ]; then
-					panel_note "探测到本机 IP：${lan}${pub:+    公网 IP：${pub}}"
+				panel_note "访问地址用 IP 即可（公网 IP 归你所有；内网 IP 仅本机/内网可用）"
+				if [ -n "$pub" ]; then
+					panel_note "探测到：公网 IP ${FG_W}${pub}${RST}   内网 IP ${lan:-未探测到}"
+					ask "访问地址（回车用公网 IP）" "$pub"
+				elif [ -n "$lan" ]; then
+					panel_note "未探测到公网 IP（可能被 NAT/防火墙挡住），只能确定内网 IP ${FG_W}${lan}${RST}"
+					ask "访问地址" "$lan"
+				else
+					ask "访问地址（如 203.0.113.10 或 192.168.1.10）" ""
 				fi
-				ask "访问地址（留空 = 自动探测的 $lan）" "$lan"
 				DSH_HOST="$REPLY"
 			fi
 			[ -n "$DSH_HOST" ] || die "无法确定访问地址，请手动指定 DSH_HOST=<IP>"
@@ -440,19 +439,9 @@ wizard() {
 			;;
 	esac
 
-	# Basic Auth
-	if [ -z "$DSH_AUTH_USERNAME" ] && [ -z "$DSH_AUTH_PASSWORD" ]; then
-		panel_blank
-		panel_note "Basic Auth 是 HTTPS 前门上的账号密码（可选；公网务必开启）。"
-		if confirm "启用 Basic Auth？" y; then
-			ask "用户名" "dsh"; DSH_AUTH_USERNAME="$REPLY"
-			local gen
-			gen=$(gen_password)
-			ask_secret "密码（回车自动生成强密码）" ""
-			DSH_AUTH_PASSWORD="${REPLY:-$gen}"
-		fi
-	fi
+	# Basic Auth：本脚本不做（dsh 自带 token + cookie 认证，够用且不用维护第二套密码）
 
+	# 镜像 tag
 	panel_blank
 	ask "镜像 tag" "${DSH_TAG:-latest}"; DSH_TAG="$REPLY"
 	TLS_MODE="${DSH_TLS_MODE:-$TLS_MODE}"
@@ -462,12 +451,13 @@ wizard() {
 	panel_row "访问地址" "${FG_C}$(entry_url)${RST}"
 	panel_row "证书" "$([ "$TLS_MODE" = "acme" ] && echo "Let's Encrypt（Caddy 自动申请）" || echo "自签（容器内部 CA）")"
 	[ "$DSH_MODE" = "domain" ] && panel_row "邮箱" "${DSH_ACME_EMAIL:-未填}"
-	panel_row "Basic Auth" "$([ -n "$DSH_AUTH_USERNAME" ] && echo "${DSH_AUTH_USERNAME} / ${DSH_AUTH_PASSWORD}" || echo "未启用")"
 	panel_row "镜像" "${DSH_IMAGE}:${DSH_TAG}"
 	panel_row "端口" "$([ "$DSH_MODE" = "domain" ] && echo "80, 443" || echo "$DSH_HTTPS_PORT")"
+	panel_row "认证" "dsh 自带 token（部署后给登录链接）"
 	panel_row "安装目录" "$DSH_INSTALL_DIR"
 	panel_row "数据目录" "$DSH_DATA_DIR"
 	panel_close
+	validate_host "$DSH_HOST"
 	confirm "确认以上配置并开始部署？" y || { log_warn "已取消"; exit 0; }
 }
 
@@ -498,8 +488,6 @@ services:
       HTTPS_ACCESS_HOST: \${HTTPS_ACCESS_HOST:-}
       DSH_TLS_MODE: \${DSH_TLS_MODE:-internal}
       DSH_ACME_EMAIL: \${DSH_ACME_EMAIL:-}
-      DSH_AUTH_USERNAME: \${DSH_AUTH_USERNAME:-}
-      DSH_AUTH_PASSWORD: \${DSH_AUTH_PASSWORD:-}
       DSH_HOME: /data/dsh
       DSH_TELEMETRY_DISABLED: "1"
       DSH_TRUSTED_HOSTS: \${DSH_TRUSTED_HOSTS:-}
@@ -540,8 +528,6 @@ EOF
 HTTPS_ACCESS_HOST=${DSH_HOST}
 DSH_TLS_MODE=${TLS_MODE}
 DSH_ACME_EMAIL=${DSH_ACME_EMAIL}
-DSH_AUTH_USERNAME=${DSH_AUTH_USERNAME}
-DSH_AUTH_PASSWORD=${DSH_AUTH_PASSWORD}
 DSH_NETWORK=${DSH_NETWORK}
 DSH_DEPLOY_MODE=${DSH_DEPLOY_MODE:-$DSH_MODE}
 DSH_TAG=${DSH_TAG}
@@ -646,12 +632,12 @@ entry_url() {
 show_url() {
 	panel_open "访问入口"
 	panel_row "HTTPS" "$(entry_url)"
+	panel_row "认证" "dsh 自带 token（下方链接打开一次即可）"
 	if [ "$TLS_MODE" = "acme" ]; then
 		panel_note "证书由 Caddy 自动申请（Let's Encrypt），首次访问可能需要等几秒签发"
 	else
 		panel_note "自签证书：浏览器提示一次风险，继续访问即可"
 	fi
-	[ -n "$DSH_AUTH_USERNAME" ] && panel_row "Basic Auth" "${DSH_AUTH_USERNAME} / ${DSH_AUTH_PASSWORD}"
 	local t
 	t=$(token_url)
 	if [ -n "$t" ]; then
@@ -663,9 +649,29 @@ show_url() {
 	panel_close
 }
 
+deploy_summary() { # 部署完成后的成框信息（参考 OpenList 脚本的 SUCCESS 输出）
+	local t
+	t=$(token_url 2>/dev/null || true)
+	printf '\n  %s╭%s╮%s\n' "$FG_G" "$(rule $((IW + 2)) "━")" "$RST"
+	banner_text "$BOLD$FG_G" "  ✔ DeepSeek Harness 部署成功" "$FG_G"
+	printf '  %s╰%s╯%s\n\n' "$FG_G" "$(rule $((IW + 2)) "━")" "$RST"
+	kv "镜像" "${DSH_IMAGE}:${DSH_TAG}"
+	kv "访问地址" "${FG_C}$(entry_url)${RST}"
+	if [ -n "$t" ]; then
+		kv "首次登录" "${FG_W}${t}${RST}"
+		printf '  %s%s%s\n' "$DIM" "                 打开一次这个地址即可换到持久 cookie（token 每次重启都会变）" "$RST"
+	else
+		kv "首次登录" "稍后执行 ${FG_C}dsh-harness url${RST}"
+	fi
+	kv "证书" "$([ "$TLS_MODE" = "acme" ] && echo "Let's Encrypt（Caddy 自动申请）" || echo "自签（浏览器提示一次风险，继续即可）")"
+	kv "数据目录" "$DSH_DATA_DIR"
+	kv "管理命令" "${FG_C}dsh-harness${RST}   ${DIM}菜单 / 状态 / 日志 / 更新 / 备份 / 卸载${RST}"
+	kv "常用命令" "${FG_D}dsh-harness status | logs | url | update | uninstall${RST}"
+	printf '\n  %s提示：端口打不开先查云厂商安全组 / 防火墙；带 token 的链接等于钥匙，不要外传。%s\n\n' "$FG_Y" "$RST"
+}
+
 # ─────────────────────────── 安装 ───────────────────────────
 install_flow() {
-	banner
 	step 1 6 "环境检查"
 	log_info "$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}" ) ${FG_D}$(uname -m)${RST}"
 	step 2 6 "网络与 Docker"
@@ -686,14 +692,7 @@ install_flow() {
 	step 6 6 "启动容器"
 	compose_up || die "启动失败：cd $DSH_INSTALL_DIR && docker compose logs"
 	wait_healthy || true
-	printf '\n  %s╭%s╮%s\n' "$FG_G" "$(rule $((IW + 2)) "━")" "$RST"
-	banner_text "$BOLD$FG_G" "  ✔ 部署完成" "$FG_G"
-	printf '  %s╰%s╯%s\n' "$FG_G" "$(rule $((IW + 2)) "━")" "$RST"
-	show_url
-	printf '\n'
-	kv "管理命令" "${FG_C}dsh-harness${RST}   ${FG_D}(菜单 / 状态 / 日志 / 更新 / 配置)${RST}"
-	kv "安装目录" "$DSH_INSTALL_DIR"
-	printf '\n'
+	deploy_summary
 }
 
 # ─────────────────────── 状态与信息 ───────────────────────
@@ -706,8 +705,6 @@ load_env() { # 读取已生成的 .env（存在才读）
 	. "$ENV_FILE"
 	DSH_HOST="${HTTPS_ACCESS_HOST:-$DSH_HOST}"
 	TLS_MODE="${DSH_TLS_MODE:-internal}"
-	DSH_AUTH_USERNAME="${DSH_AUTH_USERNAME:-}"
-	DSH_AUTH_PASSWORD="${DSH_AUTH_PASSWORD:-}"
 	DSH_TAG="${DSH_TAG:-latest}"
 	return 0
 }
@@ -739,7 +736,7 @@ show_info() {
 	panel_open "配置信息"
 	kv "访问地址" "${HTTPS_ACCESS_HOST:-未设置}"
 	kv "证书模式" "$([ "$TLS_MODE" = "acme" ] && echo "acme（Let's Encrypt）" || echo "internal（自签）")"
-	kv "Basic Auth" "${DSH_AUTH_USERNAME:-未启用}"
+	kv "认证方式" "dsh 自带 token + cookie"
 	kv "镜像 tag" "${DSH_TAG:-latest}"
 	kv "网络" "${DSH_NETWORK:-dsh-network}"
 	kv "安装目录" "$DSH_INSTALL_DIR"
@@ -764,23 +761,19 @@ service_action() {
 
 config_flow() {
 	[ -f "$MARKER_FILE" ] || die "尚未安装，请先执行：dsh-harness install"
-	banner
 	load_env || true
 	DSH_HOST="${HTTPS_ACCESS_HOST:-}"
 	DSH_DOMAIN=""
-	DSH_AUTH_USERNAME=""
-	DSH_AUTH_PASSWORD=""
 	log_step "重新配置会重写 .env 与 compose，并重建容器（数据保留）"
 	wizard
 	write_files
 	compose_up || die "重建失败：cd $DSH_INSTALL_DIR && docker compose logs"
 	wait_healthy || true
-	show_url
+	deploy_summary
 }
 
 update_flow() {
 	[ -f "$MARKER_FILE" ] || die "尚未安装，请先执行：dsh-harness install"
-	banner
 	load_env || true
 	local latest
 	latest=$(timeout 15 curl -fsSL 'https://registry.npmjs.org/@deepseek-ai%2fdsh' 2>/dev/null | grep -oE '"latest":"[^"]+"' | head -1 | cut -d'"' -f4)
@@ -789,7 +782,7 @@ update_flow() {
 	pull_image
 	compose_up || die "重建失败"
 	wait_healthy || true
-	show_url
+	deploy_summary
 }
 
 backup_flow() {
@@ -819,7 +812,6 @@ restore_flow() {
 
 uninstall_flow() {
 	[ -f "$MARKER_FILE" ] || die "尚未安装"
-	banner
 	log_warn "即将卸载容器 ${DSH_CONTAINER}"
 	confirm "确认卸载？" || { log_warn "已取消"; exit 0; }
 	load_env || true
@@ -839,7 +831,7 @@ uninstall_flow() {
 
 # ─────────────────────────── 交互菜单 ───────────────────────────
 MENU_NAMES=("安装 / 重装" "运行状态" "访问入口" "查看日志" "重新配置" "更新镜像" "启动/停止/重启" "备份 / 恢复" "卸载" "退出")
-MENU_HINTS=("配置向导，全自动部署" "容器健康、证书模式与数据目录" "打印 HTTPS 入口与首次登录链接" "实时跟踪容器输出" "改域名 / 端口 / Basic Auth" "拉最新镜像并重建容器" "start | stop | restart | status" "打包 data 与配置" "删除容器（数据可选保留）" "exit")
+MENU_HINTS=("配置向导，全自动部署" "容器健康、证书模式与数据目录" "打印 HTTPS 入口与首次登录链接" "实时跟踪容器输出" "改域名 / 端口 / 镜像 tag" "拉最新镜像并重建容器" "start | stop | restart | status" "打包 data 与配置" "删除容器（数据可选保留）" "exit")
 MENU_ACTIONS=(install status url logs config update service backup uninstall quit)
 
 MENU_LINES=0
@@ -941,7 +933,7 @@ DeepSeek Harness Docker 一键脚本
 用法:
   bash install.sh                 交互菜单
   bash install.sh install         安装（DSH_FORCE=1 覆盖重装）
-  bash install.sh config          重新配置（域名 / 端口 / Basic Auth）
+  bash install.sh config          重新配置（域名 / 端口 / 镜像 tag）
   bash install.sh update          拉最新镜像并重建容器
   bash install.sh start|stop|restart|status|logs|url
   bash install.sh backup          备份配置与数据
@@ -952,7 +944,6 @@ DeepSeek Harness Docker 一键脚本
 常用环境变量:
   DSH_DOMAIN=dsh.example.com      域名（留空 = 用本机 IP + 自签证书）
   DSH_HOST=192.168.1.10           直接指定访问地址（域名或 IP）
-  DSH_AUTH_USERNAME / DSH_AUTH_PASSWORD   Basic Auth（两个都填才启用）
   DSH_ACME_EMAIL=me@example.com   Let's Encrypt 通知邮箱
   DSH_HTTPS_PORT=8443             IP 模式下的 HTTPS 端口
   DSH_TAG=latest                  镜像 tag

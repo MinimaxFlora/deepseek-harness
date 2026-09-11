@@ -4,11 +4,12 @@
 [![Upstream](https://img.shields.io/badge/upstream-%40deepseek--ai%2Fdsh%200.1.5--rc.1-4D6BFE)](https://www.npmjs.com/package/@deepseek-ai/dsh)
 [![License](https://img.shields.io/badge/license-MIT-2EA44F)](LICENSE)
 
-一个容器跑起 DeepSeek Harness（`dsh`）的官方 Web UI：**镜像内自带 Caddy 做 HTTPS（8443）+ 可选
-Basic Auth**，dsh 本体按局域网可用打好补丁，数据全部落在 `./data` 下。
+一个容器跑起 DeepSeek Harness（`dsh`）的官方 Web UI：**镜像内自带 Caddy 做 HTTPS（8443）**，
+dsh 本体按局域网可用打好补丁（自动绑 `0.0.0.0`、`/api` 前门围栏、`--expose-internals`），
+认证用 dsh 自带的 token + cookie，数据全部落在 `./data` 下。
 
 ```
-浏览器 ──https://<HTTPS_ACCESS_HOST>:8443──▶ Caddy（TLS + 可选 Basic Auth）
+浏览器 ──https://<HTTPS_ACCESS_HOST>:8443──▶ Caddy（TLS）
                                               └─http://127.0.0.1:3080─▶ dsh web
 ```
 
@@ -19,7 +20,7 @@ Basic Auth**，dsh 本体按局域网可用打好补丁，数据全部落在 `./
 ## 一键脚本
 
 ```sh
-# 交互菜单（推荐）：域名 / IP、端口、Basic Auth 全部向导式配置
+# 交互菜单（推荐）：域名 / IP、端口 / 镜像 tag 向导式配置，部署完打印部署信息
 bash <(curl -fsSL https://raw.githubusercontent.com/MinimaxFlora/deepseek-harness/main/install.sh)
 
 # 或者先下载再跑
@@ -28,13 +29,17 @@ sudo bash install.sh
 ```
 
 脚本会：检查环境 → 自动装 Docker（国内走私有源镜像）→ 向导式配置 → 拉镜像 → 启动 →
-等到 `healthy` 并打印访问地址与首次登录链接，并安装一个管理命令 `dsh-harness`
+等到 `healthy`，然后打印一条**成框的部署信息**（镜像 / 访问地址 / 首次登录链接 / 数据目录 /
+管理命令 / 常用命令），并安装管理命令 `dsh-harness`
 （菜单 / 状态 / 日志 / 访问入口 / 重新配置 / 更新 / 备份 / 卸载）。
+
+**认证走 dsh 自带的 token**，不做 Basic Auth：部署完把打印出来的 `https://…/?token=…`
+打开一次换持久 cookie，之后直接访问站点根地址。
 
 ```sh
 dsh-harness                 # 交互菜单
 dsh-harness status          # 运行状态
-dsh-harness config          # 改域名 / 端口 / Basic Auth 并重建
+dsh-harness config          # 改域名 / 端口 / 镜像 tag 并重建
 dsh-harness url             # 打印 HTTPS 入口 + 带 token 的首次登录地址
 dsh-harness update          # 拉最新镜像并重建
 ```
@@ -43,27 +48,26 @@ dsh-harness update          # 拉最新镜像并重建
 
 | 选择 | 证书 | 端口 | 说明 |
 | --- | --- | --- | --- |
-| 填域名（推荐） | Let's Encrypt，容器内 Caddy 自动申请 | 映射 80 + 443 | 需要域名 A 记录指向本机公网 IP；脚本申请前会校验解析并提示 |
-| 不填 / 填 IP | 容器内部 CA 自签 | 默认映射 8443 | 内网直接可用，浏览器提示一次风险，继续即可 |
+| 填域名 | Let's Encrypt，容器内 Caddy 自动申请 | 映射 80 + 443 | 需要域名 A 记录指向本机公网 IP；脚本申请前会校验解析并提示 |
+| 填 IP（默认） | 容器内部 CA 自签 | 默认映射 8443 | **脚本默认探测公网 IP 并作为访问地址**，探不到才退回内网 IP；浏览器提示一次风险，继续即可 |
 
 用环境变量跳过向导：
 
 ```sh
-DSH_DOMAIN=dsh.example.com DSH_ACME_EMAIL=me@example.com \
-DSH_AUTH_USERNAME=dsh DSH_AUTH_PASSWORD='强密码' \
-sudo -E bash install.sh install
+DSH_DOMAIN=dsh.example.com DSH_ACME_EMAIL=me@example.com sudo -E bash install.sh install                      # 域名 + Let's Encrypt
 
+DSH_HOST=203.0.113.10 DSH_HTTPS_PORT=8443 sudo -E bash install.sh install   # 公网 IP + 自签
 DSH_HOST=192.168.1.10 DSH_HTTPS_PORT=8443 sudo -E bash install.sh install   # 内网 IP + 自签
 ```
 
-`.env` 里对应 `HTTPS_ACCESS_HOST`：**填域名 = 真证书，填 IP 或留空 = 自签**（留空时脚本自动探测本机 IP）。
+`.env` 里对应 `HTTPS_ACCESS_HOST`：**填域名 = 真证书，填 IP 或留空 = 自签**（留空时先探公网 IP，探不到再用内网 IP）。
 
 ### 手动部署（不用脚本）
 
 ```sh
 git clone https://github.com/MinimaxFlora/deepseek-harness.git
 cd deepseek-harness
-cp .env.example .env            # 改 HTTPS_ACCESS_HOST（+ 可选的 Basic Auth）
+cp .env.example .env            # 改 HTTPS_ACCESS_HOST（IP 或域名）
 docker compose up -d
 docker compose logs -f deepseek-harness
 ```
@@ -91,8 +95,8 @@ docker run -d --name deepseek-harness --restart unless-stopped \
   dockorae/deepseek-harness:0.1.5-rc.1
 ```
 
-首次登录：dsh 自己还有一层 token。看日志里那行带 token 的地址访问一次（或 Basic Auth 后再访问
-一次），浏览器会拿到持久 cookie，之后直接进根地址即可。token 每次重启都会换。
+首次登录：dsh 自带 token 认证。访问一次带 token 的地址（`dsh-harness url` 会按你的部署地址拼好
+打印），浏览器拿到持久 cookie，之后直接进根地址即可。token 每次重启都会换。
 
 ---
 
@@ -103,12 +107,12 @@ docker run -d --name deepseek-harness --restart unless-stopped \
 | 内网 IP（默认） | `DSH_TLS_MODE=internal` | Caddy 内部 CA 按请求的域名/IP **现场签发自签证书**，所以浏览器输什么 IP 都能开（有警告） |
 | 真域名 + 自动证书 | `DSH_TLS_MODE=acme`、`HTTPS_ACCESS_HOST=dsh.example.com`、`DSH_HTTPS_PORT=443` | Let's Encrypt 需要 80/443 可达，建议前面再放一层反代 |
 | 自带证书 | `DSH_TLS_MODE=files` + `DSH_TLS_CERT` / `DSH_TLS_KEY` | 证书和私钥挂进 `/data/caddy/tls/` |
-| 要 Basic Auth | `DSH_AUTH_USERNAME` / `DSH_AUTH_PASSWORD` 都填 | 密码在启动时用 `caddy hash-password` 转成 bcrypt 写进配置，不落明文 |
 | 关掉 HTTPS | `DSH_HTTPS=0` | 只跑 dsh，直接暴露 3080（compose 里有注释掉的端口映射） |
 
 > ⚠️ 安全提醒：这个 UI 能执行 shell 命令（它就是一个编码 agent）。绑 `0.0.0.0` + 对外端口等于
-> 把远程代码执行能力暴露出去——这也是上游拒绝 `--host 0.0.0.0` 的原因。只在你信任的网段里跑，
-> 公网务必上 Basic Auth 或更外的反代认证。
+> 把远程代码执行能力暴露出去——这也是上游拒绝 `--host 0.0.0.0` 的原因。认证只有 dsh 的
+> token + cookie 这一层（`SameSite=Strict`、绑定 authority），所以**公网部署别把带 token 的链接外发**；
+> 要更强的边界就在外面自己再套一层反代认证（Basic Auth / SSO / IP 白名单都行）。
 
 ---
 
@@ -219,7 +223,6 @@ if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, truste
 | --- | --- | --- |
 | `HTTPS_ACCESS_HOST` | 空 | 浏览器要输入的名字（IP 或域名）：打印访问地址、用作围栏 authority、内部 CA 签名对象 |
 | `DSH_HTTPS_PORT` | `8443` | 宿主机映射的 HTTPS 端口（容器内固定 8443） |
-| `DSH_AUTH_USERNAME` / `DSH_AUTH_PASSWORD` | 空 | 都填才启用 Basic Auth（bcrypt 哈希在启动时生成） |
 | `DSH_TLS_MODE` | `internal` | `internal` 自签 / `acme` 真证书 / `files` 自带证书 |
 | `DSH_ACME_EMAIL` | 空 | ACME 模式下的邮箱 |
 | `DSH_TLS_CERT` / `DSH_TLS_KEY` | 空 | `files` 模式的证书路径（挂进 `/data/caddy`） |
@@ -321,7 +324,7 @@ access tokens，**不要**用账号密码）。
 | --- | --- |
 | 打不开页面 | `docker compose logs -f deepseek-harness` 看 Caddy 日志（`curl -k https://<host>:8443/` 自测） |
 | 浏览器证书警告 | 自签证书的正常表现；要么接受风险继续，要么 `DSH_TLS_MODE=acme` / `files` |
-| Basic Auth 一直弹窗 | 用户名/密码改了要 `docker compose up -d` 重建容器（哈希在启动时重算） |
+| 打开站点提示要 token | cookie 还没换到：跑 `dsh-harness url`，用它打印的链接访问一次 |
 | 页面能开但一直「连接中」/设置页空白 | `/api` 被围栏 403：把浏览器地址栏里的名字（IP/域名）填进 `HTTPS_ACCESS_HOST` 或 `DSH_TRUSTED_HOSTS` |
 | 提示 settings are unavailable in this browser | 客户端单点修复没生效——看启动日志 `client patch:` 行；若报 “filesystem is read-only” 说明容器根目录只读且镜像被重建覆盖，重新拉取镜像即可 |
 | 401 / token 无效 | token 每次重启轮换，用日志里最新的带 token 地址访问一次即可，之后靠 cookie |
