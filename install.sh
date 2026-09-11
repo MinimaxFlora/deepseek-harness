@@ -832,57 +832,71 @@ uninstall_flow() {
 MENU_NAMES=("安装 / 重装" "运行状态" "访问入口" "查看日志" "重新配置" "更新镜像" "启动/停止/重启" "备份 / 恢复" "卸载" "退出")
 MENU_HINTS=("配置向导，全自动部署" "容器健康、证书模式与数据目录" "打印 HTTPS 入口与首次登录链接" "实时跟踪容器输出" "改域名 / 端口 / Basic Auth" "拉最新镜像并重建容器" "start | stop | restart | status" "打包 data 与配置" "删除容器（数据可选保留）" "exit")
 MENU_ACTIONS=(install status url logs config update service backup uninstall quit)
-MENU_H=0
 
-menu_render() {
+MENU_LINES=0
+
+menu_block() { # 画整块菜单；每行前置 \033[K 清行，重绘时不会有残影
 	local i name hint
+	printf '\033[K  %s╭─%s %sDEEPSEEK HARNESS%s %s· 管理菜单%s\n' "$FG_D" "$RST" "$BOLD$FG_C" "$RST" "$DIM" "$RST"
 	for i in "${!MENU_NAMES[@]}"; do
 		name="${MENU_NAMES[$i]}"; hint="${MENU_HINTS[$i]}"
 		if [ "$i" -eq "$1" ]; then
-			printf '  %s│%s  %s %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$CUR" "$FG_M" "$(pad "$name" 18)" "$RST" "$DIM" "$hint" "$RST"
+			printf '\033[K  %s│%s  %s %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$CUR" "$FG_M" "$(pad "$name" 18)" "$RST" "$DIM" "$hint" "$RST"
 		else
-			printf '  %s│%s    %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$FG_W" "$(pad "$name" 18)" "$RST" "$FG_D" "$hint" "$RST"
+			printf '\033[K  %s│%s    %s%s%s  %s%s%s\n' "$FG_D" "$RST" "$FG_W" "$(pad "$name" 18)" "$RST" "$FG_D" "$hint" "$RST"
 		fi
 	done
-	printf '  %s╰%s%s\n' "$FG_D" "$(rule 58)" "$RST"
+	printf '\033[K  %s╰%s%s\n' "$FG_D" "$(rule 58)" "$RST"
+	MENU_LINES=$((${#MENU_NAMES[@]} + 2))   # 标题 + 条目 + 收尾
 }
 
 menu() {
-	local sel=0 key i
+	local sel=0 key c2 c3 act i n=${#MENU_NAMES[@]}
 	if [ -z "$TTY_FD" ]; then
 		printf '\n'
-		printf '  %s╭─%s %sDEEPSEEK HARNESS%s %s· 管理菜单%s\n' "$FG_D" "$RST" "$BOLD$FG_C" "$RST" "$DIM" "$RST"
-		menu_render 0
+		menu_block 0
 		log_dim "无交互终端：请用子命令 dsh-harness install|status|logs|config|update|..."
 		return 0
 	fi
+	printf '\n'
 	while true; do
-		printf '\n  %s╭─%s %sDEEPSEEK HARNESS%s %s· 管理菜单%s\n' "$FG_D" "$RST" "$BOLD$FG_C" "$RST" "$DIM" "$RST"
-		menu_render "$sel"
-		MENU_H=$((${#MENU_NAMES[@]} + 2))
-		printf '  %s↑↓/jk 选择 · Enter 确认 · 数字直选 · q 退出%s ' "$DIM" "$RST" >&2
+		menu_block "$sel"
+		printf '\033[K  %s↑↓/jk 选择 · Enter 确认 · 数字直选 · q 退出%s ' "$DIM" "$RST" >&2
 		IFS= read -r -s -n1 -u "$TTY_FD" key || key=q
-		# 清掉刚画的菜单，避免刷屏
-		printf '\033[%dA\033[J' "$MENU_H"
+
+		# 先只决定「改选中」还是「执行」，方向键/移动键一律不执行动作
+		act=1
 		case "$key" in
-			$'\033')
-				read -r -s -n2 -u "$TTY_FD" key || true
-				case "$key" in
-					'[A') sel=$(( (sel - 1 + ${#MENU_NAMES[@]}) % ${#MENU_NAMES[@]} )) ;;
-					'[B') sel=$(( (sel + 1) % ${#MENU_NAMES[@]} )) ;;
-				esac
-				continue ;;
-			j|J) sel=$(( (sel + 1) % ${#MENU_NAMES[@]} )); continue ;;
-			k|K) sel=$(( (sel - 1 + ${#MENU_NAMES[@]}) % ${#MENU_NAMES[@]} )); continue ;;
-			q|Q) printf '\n'; exit 0 ;;
-			'')  : ;;
+			$'\033')                            # 方向键：兼容 ESC[A 与 ESC OA 两种编码
+				act=0
+				c2=""
+				IFS= read -r -s -n1 -t 0.08 -u "$TTY_FD" c2 || c2=""
+				case "$c2" in
+					'[' | 'O')
+						c3=""
+						IFS= read -r -s -n1 -t 0.08 -u "$TTY_FD" c3 || c3=""
+						case "$c3" in
+							A) sel=$(((sel - 1 + n) % n)) ;;
+							B) sel=$(((sel + 1) % n)) ;;
+						esac ;;
+				esac ;;
+			j|J) act=0; sel=$(((sel + 1) % n)) ;;
+			k|K) act=0; sel=$(((sel - 1 + n) % n)) ;;
+			q|Q) printf '\n\n'; exit 0 ;;
+			'')  act=1 ;;                       # 回车：执行当前项
 			[1-9]|0)
 				if [ "$key" = "0" ]; then i=9; else i=$((key - 1)); fi
-				[ "$i" -lt "${#MENU_NAMES[@]}" ] && sel="$i" || continue ;;
-			*) continue ;;
+				if [ "$i" -lt "$n" ]; then sel="$i"; else act=0; fi ;;
+			*)   act=0 ;;
 		esac
-		printf '\n'
-		run_menu_action "${MENU_ACTIONS[$sel]}"
+
+		# 无论继续选还是执行动作，都先回到菜单块首并清掉整块
+		printf '\033[%dA\033[J' "$MENU_LINES"
+		if [ "$act" = "1" ]; then
+			printf '\n'
+			run_menu_action "${MENU_ACTIONS[$sel]}"
+			printf '\n'
+		fi
 	done
 }
 
