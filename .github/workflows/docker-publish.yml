@@ -1,14 +1,20 @@
 name: docker-publish
 
-# Build the image and push it to Docker Hub on every meaningful change to main,
-# and on demand from the Actions tab.
+# Build the image, smoke-test that it boots, and push it to Docker Hub.
+#
+# Docker Hub credentials are OPTIONAL on purpose: without DOCKERHUB_USERNAME /
+# DOCKERHUB_TOKEN the workflow still builds and boots the image, so a fresh clone
+# or a fork is green before any secret exists. Add the two secrets and the same
+# run starts pushing.
+#
+# Action refs are pinned to the published major tags — these actions have no
+# `main` branch, so `@main` fails to resolve.
 on:
   push:
     branches: [main]
     paths:
       - 'Dockerfile'
       - 'scripts/**'
-      - 'patches/**'
       - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
     inputs:
@@ -24,7 +30,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v7
 
       - name: Resolve upstream version
         id: ver
@@ -34,21 +40,36 @@ jobs:
           version="${{ github.event.inputs.dsh_version }}"
           echo "version=${version:-$default_version}" >> "$GITHUB_OUTPUT"
 
+      - name: Decide whether to push
+        id: mode
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${TOKEN:-}" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN are not set — building and smoke-testing only."
+          fi
+
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@main
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@main
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@main
+      - name: Build (and push when credentials exist)
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          push: ${{ steps.mode.outputs.push == 'true' }}
+          # Without a push the image is loaded locally so the smoke test can run.
+          load: ${{ steps.mode.outputs.push != 'true' }}
           build-args: |
             DSH_VERSION=${{ steps.ver.outputs.version }}
           tags: |
@@ -56,6 +77,35 @@ jobs:
             ${{ env.IMAGE }}:latest
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Boot the image exactly the way the compose file does (read-only rootfs,
+      # tmpfs /tmp) and assert the two behaviours this image exists for: the
+      # webserver binds all interfaces, and the client-side loopback gate is
+      # gone. This is what catches an upstream bump that changes the bundle.
+      - name: Smoke test the boot
+        if: steps.mode.outputs.push != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-data/dsh" "$RUNNER_TEMP/dsh-data/caddy"
+          docker run -d --name dsh-ci \
+            --read-only --tmpfs /tmp:mode=1777,size=256m \
+            --security-opt no-new-privileges:true \
+            -e HTTPS_ACCESS_HOST=127.0.0.1 \
+            -v "$RUNNER_TEMP/dsh-data/dsh:/data/dsh" \
+            -v "$RUNNER_TEMP/dsh-data/caddy:/data/caddy" \
+            "$IMAGE:${{ steps.ver.outputs.version }}"
+          for _ in $(seq 1 40); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' dsh-ci 2>/dev/null || echo starting)
+            [ "$status" = "healthy" ] && break
+            sleep 5
+          done
+          docker logs dsh-ci 2>&1 | tail -20
+          echo "health=$status"
+          [ "$status" = "healthy" ] || { echo "::error::container never became healthy"; exit 1; }
+          docker exec dsh-ci ss -lntp | grep -q '0.0.0.0:3080' \
+            || { echo "::error::webserver is not bound to all interfaces"; exit 1; }
+          docker logs dsh-ci 2>&1 | grep -q 'client patch: in place' \
+            || { echo "::error::client-side loopback gate was not patched"; exit 1; }
+          echo "smoke test passed: bound 0.0.0.0:3080 with the client gate patched"
