@@ -247,9 +247,16 @@ docker buildx build --platform linux/amd64 \
   -t dockorae/deepseek-harness:0.1.5-rc.1 -t dockorae/deepseek-harness:latest --push .
 ```
 
-CI：`.github/workflows/docker-publish.yml`（main 上 Dockerfile/scripts/patches 有改动即构建，或
-Actions 里手动 `workflow_dispatch`）。需要仓库 Secret：`DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN`
-（Docker Hub → Account Settings → Personal access tokens）。
+CI：`.github/workflows/docker-publish.yml` —— push 到 main 或手动触发时自动跑：
+
+1. **自动检测上游版本**：从 npm 读 `@deepseek-ai/dsh` 的 `dist-tags.latest`，作为 `--build-arg DSH_VERSION` 传进构建（读不到才回落到 Dockerfile 里的 pin）。
+2. 构建镜像（buildx）。
+3. **冒烟测试**：按 compose 同样的方式起容器（`read_only` + `tmpfs /tmp`），要求 health 变 `healthy`、`ss` 必须看到 `0.0.0.0:3080`、启动日志必须有 `client patch: in place` —— 上游把 bundle 改坏了会直接红。
+4. **推 Docker Hub**：`:latest` + `:<检测到的版本号>` 两个 tag。
+
+没配 Secret 也能跑（只构建 + 冒烟，不推送），所以新克隆的仓库一开始就是绿的。要推送需要仓库
+Secret：`DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN`（Docker Hub → Account Settings → Personal
+access tokens，**不要**用账号密码）。
 
 ---
 
@@ -278,7 +285,9 @@ docker compose exec deepseek-harness dsh --profile web --help
 
 ## 上游版本升级
 
-1. 改 `Dockerfile` 的 `ARG DSH_VERSION`（也可用 compose 的 `DSH_VERSION` 覆盖）。
+1. 镜像/CI 会自动使用 npm 上 `@deepseek-ai/dsh` 的最新版本（CI 每次运行都重新检测）；本地构建用
+   `Dockerfile` 的 `ARG DSH_VERSION` 默认值，或 `--build-arg DSH_VERSION=…` / compose 的
+   `DSH_VERSION` 显式覆盖。
 2. 重新构建：构建期会校验客户端修复能否命中，上游改结构会**直接构建失败**而不是悄悄放过。
 3. 实机验收：容器起来后确认日志里有 `client patch: /api Host fence intact`，从另一台机器
    打开 HTTPS 地址，进 设置 → Models 能看到提供方目录。
