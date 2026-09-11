@@ -1,0 +1,75 @@
+# DeepSeek Harness (dsh) — one container, HTTPS front door built in.
+#
+#   docker compose up -d      ->  https://<HTTPS_ACCESS_HOST>:8443/
+#
+# dsh itself listens on 0.0.0.0:3080 inside the container network; Caddy is the
+# only published port. Both are covered by the same data directory, so the whole
+# deployment is one folder of ./data plus this file.
+name: deepseek-harness
+
+services:
+  deepseek-harness:
+    image: dockorae/deepseek-harness:${DSH_TAG:-0.1.5-rc.1}
+    build:
+      context: .
+      args:
+        DSH_VERSION: ${DSH_VERSION:-0.1.5-rc.1}
+    container_name: ${CONTAINER_NAME:-deepseek-harness}
+    restart: unless-stopped
+    networks:
+      - dsh-network
+    environment:
+      # The name browsers type. Printed in the log, used as the fence authority,
+      # and the name the internal CA signs for. Set it to the host's LAN IP
+      # (e.g. 192.168.1.10) or a domain.
+      HTTPS_ACCESS_HOST: ${HTTPS_ACCESS_HOST:-}
+      # Optional HTTP Basic Auth in front of the UI. Leave empty to rely on the
+      # harness' own per-process token URL + browser cookie.
+      DSH_AUTH_USERNAME: ${DSH_AUTH_USERNAME:-}
+      DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:-}
+      DSH_HOME: /data/dsh
+      DSH_TELEMETRY_DISABLED: "1"
+      # Extra /api Host-fence authorities (comma separated), e.g. a second name
+      # or a reverse proxy in front of this container.
+      DSH_TRUSTED_HOSTS: ${DSH_TRUSTED_HOSTS:-}
+      # Credential preset: a key the launching environment supplies is resolved
+      # by reference and shown read-only in the settings UI. Leave empty to
+      # configure models by hand in the UI instead.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data/dsh:/data/dsh
+      - ./data/workspace:/workspace
+      - ./data/caddy:/data/caddy
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # HTTPS front door. Point 443 at it (DSH_HTTPS_PORT=443) if you also want
+      # http->https redirects or an ACME certificate.
+      - "${DSH_HTTPS_PORT:-8443}:8443"
+      # Uncomment to reach dsh directly, bypassing Caddy (plain HTTP, token auth):
+      # - "${DSH_PORT:-3080}:3080"
+    # The harness writes everything it owns under /data and /workspace.
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Inline on purpose: no `curl -f`, because the UI is token-gated and answers
+      # 401 before anyone signs in — -f would report unhealthy forever.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:3080/ | grep -qE '^(200|303|401)$'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Joins an existing network when the name is already taken (e.g. the 1Panel
+  # app store convention: DSH_NETWORK=1panel-network).
+  dsh-network:
+    name: ${DSH_NETWORK:-dsh-network}

@@ -1,0 +1,61 @@
+name: docker-publish
+
+# Build the image and push it to Docker Hub on every meaningful change to main,
+# and on demand from the Actions tab.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'scripts/**'
+      - 'patches/**'
+      - '.github/workflows/docker-publish.yml'
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: '@deepseek-ai/dsh version to bake in'
+        required: false
+        default: '0.1.5-rc.1'
+
+env:
+  IMAGE: dockorae/deepseek-harness
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main
+
+      - name: Resolve upstream version
+        id: ver
+        run: |
+          set -euo pipefail
+          default_version=$(awk -F= '/^ARG DSH_VERSION=/{print $2}' Dockerfile | tr -d ' \r')
+          version="${{ github.event.inputs.dsh_version }}"
+          echo "version=${version:-$default_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@main
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@main
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@main
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            DSH_VERSION=${{ steps.ver.outputs.version }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

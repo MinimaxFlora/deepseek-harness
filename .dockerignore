@@ -1,0 +1,9 @@
+.git
+.gitignore
+.github
+.env
+data/
+workspace/
+*.log
+README.md
+LICENSE

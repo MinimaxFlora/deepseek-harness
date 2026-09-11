@@ -1,0 +1,8 @@
+# Shell entrypoints are executed inside the image and on devices — keep LF.
+* text=auto
+*.sh            text eol=lf
+*.init          text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.mjs           text eol=lf
