@@ -29,20 +29,30 @@ sudo bash install.sh
 ```
 
 脚本会：检查环境 → 自动装 Docker（国内走私有源镜像）→ 向导式配置 → 拉镜像 → 启动 →
-等到 `healthy`，然后打印一条**成框的部署信息**（镜像 / 访问地址 / 首次登录链接 / 数据目录 /
-管理命令 / 常用命令），并安装管理命令 `dsh-harness`
-（菜单 / 状态 / 日志 / 访问入口 / 重新配置 / 更新 / 备份 / 卸载）。
+等到 `healthy`，然后打印一条**成框的部署信息**（镜像 / 公网+内网访问地址 / 首次登录链接 /
+数据目录 / 认证方式）并自动安装管理命令 `dsh-harness`。
 
 **认证走 dsh 自带的 token**，不做 Basic Auth：部署完把打印出来的 `https://…/?token=…`
 打开一次换持久 cookie，之后直接访问站点根地址。
 
+脚本采用 OpenList 管理脚本那套结构：**数字菜单 + 子命令 + `--help`**。
+
 ```sh
-dsh-harness                 # 交互菜单
-dsh-harness status          # 运行状态
-dsh-harness config          # 改域名 / 端口 / 镜像 tag 并重建
-dsh-harness url             # 打印 HTTPS 入口 + 带 token 的首次登录地址
-dsh-harness update          # 拉最新镜像并重建
+dsh-harness                        # 交互菜单（0-16）
+dsh-harness install [安装路径]      # 安装（默认 /opt/deepseek-harness）
+dsh-harness status                 # 运行状态 + 访问入口
+dsh-harness url                    # 访问入口 + 首次登录链接（按实际部署地址拼）
+dsh-harness logs                   # 实时日志（Ctrl+C 退出）
+dsh-harness config                 # 重新配置（域名 / 端口 / 镜像 tag）并重建
+dsh-harness update                 # 拉最新镜像并重建（摘要相同会跳过）
+dsh-harness start|stop|restart     # 容器启停
+dsh-harness backup|restore         # 数据 + 配置打包 / 恢复（默认取最新一份）
+dsh-harness docker-install         # 安装 / 检查 Docker
+dsh-harness about | --help         # 关于 / 全部命令与可用环境变量
 ```
+
+菜单里另有：Docker 容器管理（状态 / 进容器 / 启停 / 删除）、定时更新镜像（写 crontab）、
+系统状态（容器 / 端口 / 磁盘 / 内存 / Docker）。
 
 **域名还是 IP？**
 
