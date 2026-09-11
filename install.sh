@@ -30,13 +30,89 @@
 ###############################################################################
 
 # 颜色定义（用真转义字符：echo 与 printf 都能正确着色）
-RED_COLOR=$'[1;31m'
-GREEN_COLOR=$'[1;32m'
-YELLOW_COLOR=$'[1;33m'
-BLUE_COLOR=$'[1;34m'
-CYAN_COLOR=$'[1;36m'
-PURPLE_COLOR=$'[1;35m'
-RES=$'[0m'
+# ─────────────────────────── 颜色能力与渐变 ───────────────────────────
+# COLOR_LEVEL: 3=24bit 真彩 | 2=256 色 | 1=8 色 | 0=无色
+# 无色场景：非终端（重定向 / CI / 日志）、NO_COLOR、TERM=dumb；DSH_COLOR_LEVEL 可强制覆盖。
+COLOR_LEVEL=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    case "${COLORTERM:-} ${TERM:-}" in
+        *truecolor*|*24bit*) COLOR_LEVEL=3 ;;
+        *256color*)          COLOR_LEVEL=2 ;;
+        *)                   COLOR_LEVEL=1 ;;
+    esac
+fi
+# NO_COLOR 是用户级约定，优先于强制覆盖；DSH_COLOR_LEVEL 便于脚本/测试指定能力
+case "${DSH_COLOR_LEVEL:-}" in
+    0|1|2|3) [ -z "${NO_COLOR:-}" ] && COLOR_LEVEL="$DSH_COLOR_LEVEL" ;;
+esac
+
+if [ "$COLOR_LEVEL" -gt 0 ]; then
+    RED_COLOR=$'\033[1;31m';  GREEN_COLOR=$'\033[1;32m'; YELLOW_COLOR=$'\033[1;33m'
+    BLUE_COLOR=$'\033[1;34m'; CYAN_COLOR=$'\033[1;36m';  PURPLE_COLOR=$'\033[1;35m'
+    BOLD=$'\033[1m';          DIM=$'\033[2m';            RES=$'\033[0m'
+else
+    RED_COLOR=""; GREEN_COLOR=""; YELLOW_COLOR=""; BLUE_COLOR=""; CYAN_COLOR=""; PURPLE_COLOR=""
+    BOLD=""; DIM=""; RES=""
+fi
+
+# 渐变端点：#4D6BFE（DeepSeek 蓝）→ #22D3EE（青）→ #34D399（绿）
+GRAD_FROM="77 107 254"
+GRAD_MID="34 211 238"
+GRAD_TO="52 211 153"
+
+grad_rgb() { # grad_rgb <位置> <总数> → "r g b"
+    local i="$1" n="$2" t r1 g1 b1 r2 g2 b2 k
+    if [ "$n" -le 1 ]; then t=0; else t=$((i * 1000 / (n - 1))); fi
+    if [ "$t" -le 500 ]; then
+        set -- $GRAD_FROM; r1=$1; g1=$2; b1=$3
+        set -- $GRAD_MID;  r2=$1; g2=$2; b2=$3
+        k=$t
+    else
+        set -- $GRAD_MID;  r1=$1; g1=$2; b1=$3
+        set -- $GRAD_TO;   r2=$1; g2=$2; b2=$3
+        k=$((t - 500))
+    fi
+    printf '%s %s %s' \
+        $((r1 + (r2 - r1) * k / 500)) \
+        $((g1 + (g2 - g1) * k / 500)) \
+        $((b1 + (b2 - b1) * k / 500))
+}
+
+grad_esc() { # grad_esc <位置> <总数> → 该处前景色（按终端能力降级）
+    [ "$COLOR_LEVEL" -gt 0 ] || return 0
+    local rgb r g b
+    rgb=$(grad_rgb "$1" "$2"); set -- $rgb; r=$1; g=$2; b=$3
+    case "$COLOR_LEVEL" in
+        3) printf '\033[38;2;%d;%d;%dm' "$r" "$g" "$b" ;;
+        2) printf '\033[38;5;%dm' "$((16 + 36 * (r * 5 / 255) + 6 * (g * 5 / 255) + (b * 5 / 255)))" ;;
+        *) printf '\033[1;36m' ;;
+    esac
+}
+
+rule_grad() { # rule_grad <长度> [字符] —— 分段着色的渐变横线（每段 6 列）
+    local n="$1" ch="${2:-─}" seg=6 i=0 x
+    if [ "$COLOR_LEVEL" -eq 0 ]; then rule "$n" "$ch"; return 0; fi
+    while [ "$i" -lt "$n" ]; do
+        x=$((n - i)); [ "$x" -gt "$seg" ] && x="$seg"
+        grad_esc "$i" "$n"
+        rule "$x" "$ch"
+        i=$((i + x))
+    done
+    printf '%s' "$RES"
+}
+
+bar() { # bar <当前> <总数> [宽度] —— 渐变进度条（只用在没有右边框的行上）
+    local cur="$1" total="$2" width="${3:-20}" filled=0 i
+    [ "$total" -le 0 ] && total=1
+    filled=$((cur * width / total))
+    for ((i = 0; i < width; i++)); do
+        if [ "$i" -lt "$filled" ]; then
+            grad_esc "$i" "$width"; printf '█'
+        else
+            printf '%s░%s' "$DIM" "$RES"
+        fi
+    done
+}
 
 # 尽量启用 UTF-8：下面按「字符数」算显示宽度要靠它（否则中文会被算成 3 倍宽）
 if [ "$(LC_ALL=C.UTF-8 bash -c 'echo ${#1}' _ 中文 2>/dev/null)" = "2" ]; then
@@ -156,7 +232,8 @@ MARKER_FILE="$INSTALL_PATH/.installed"
 # 更新/卸载/状态等操作使用已安装的路径
 if [ "$1" = "update" ] || [ "$1" = "uninstall" ] || [ "$1" = "status" ] || [ "$1" = "url" ] || \
    [ "$1" = "logs" ] || [ "$1" = "config" ] || [ "$1" = "backup" ] || [ "$1" = "restore" ] || \
-   [ "$1" = "start" ] || [ "$1" = "stop" ] || [ "$1" = "restart" ]; then
+   [ "$1" = "start" ] || [ "$1" = "stop" ] || [ "$1" = "restart" ] || [ "$1" = "domain" ] || \
+   [ "$1" = "ip" ] || [ "$1" = "switch" ]; then
     if [ -f "$ENV_FILE" ]; then
         INSTALL_PATH=$(sed -n 's/^#\? *DSH_INSTALL_DIR=//p' "$ENV_FILE" 2>/dev/null | head -1)
         INSTALL_PATH="${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}"
@@ -202,30 +279,104 @@ rule() { # rule <重复次数> [字符]
     printf '%s' "$out"
 }
 
-print_line() { # 成框输出用的一行（对齐到 box 宽度）
-    local text="$1" width="${2:-50}"
-    printf '│ %s%s │\n' "$text" "$(pad '' $((width - $(str_width "$text"))))"
-}
-
-draw_box() { # draw_box <行...>：自动按显示宽度对齐的方框
+draw_box() { # draw_box [--title 标题] <行...> —— 圆角方框、渐变边框、内容按显示宽度对齐
+    local title=""
+    if [ "$1" = "--title" ]; then title="$2"; shift 2; fi
     local -a lines=("$@")
-    local max=50 i w
+    local max=54 i w tw x inner
     for i in "${!lines[@]}"; do
         w=$(str_width "${lines[$i]}")
-        [ "$w" -gt "$max" ] && max=$w
+        [ "$w" -gt "$max" ] && max="$w"
     done
-    echo -e "${GREEN_COLOR}┌$(rule $((max + 2)))┐${RES}"
+    if [ -n "$title" ]; then
+        tw=$(str_width "$title")
+        [ $((tw + 8)) -gt "$max" ] && max=$((tw + 8))
+    fi
+    inner=$((max + 2))
+
+    if [ -n "$title" ]; then
+        tw=$(str_width "$title"); x=$((inner - tw - 3)); [ "$x" -lt 1 ] && x=1
+        printf '%s╭─%s %s%s%s %s%s%s╮%s\n' \
+            "$(grad_esc 0 2)" "$RES" "$BOLD$(grad_esc 1 3)" "$title" "$RES" \
+            "$(rule_grad "$x")" "$(grad_esc 1 2)" "$RES" "$RES"
+    else
+        printf '%s╭%s%s╮%s\n' "$(grad_esc 0 2)" "$(rule_grad "$inner")" "$(grad_esc 1 2)" "$RES"
+    fi
+
     for i in "${!lines[@]}"; do
         w=$(str_width "${lines[$i]}")
-        printf '%s│ %s%s │%s\n' "$GREEN_COLOR" "${lines[$i]}" "$(pad '' $((max - w)))" "$RES"
+        printf '%s│%s %s%s %s│%s\n' \
+            "$(grad_esc 0 2)" "$RES" "${lines[$i]}" "$(pad '' $((max - w)))" "$(grad_esc 1 2)" "$RES"
     done
-    echo -e "${GREEN_COLOR}└$(rule $((max + 2)))┘${RES}"
+
+    printf '%s╰%s%s╯%s\n' "$(grad_esc 0 2)" "$(rule_grad "$inner")" "$(grad_esc 1 2)" "$RES"
 }
 
-ok()   { echo -e "${GREEN_COLOR}●${RES} $*"; }
-info() { echo -e "${CYAN_COLOR}→${RES} $*"; }
-warn() { echo -e "${YELLOW_COLOR}温馨提示：$*${RES}"; }
-fail() { echo -e "${RED_COLOR}$*${RES}"; }
+ok()   { printf '  %s✔%s %s\n' "$GREEN_COLOR" "$RES" "$*"; }
+info() { printf '  %s→%s %s\n' "$CYAN_COLOR" "$RES" "$*"; }
+warn() { printf '  %s▲%s %s%s%s\n' "$YELLOW_COLOR" "$RES" "$YELLOW_COLOR" "$*" "$RES"; }
+fail() { printf '  %s✖%s %s%s%s\n' "$RED_COLOR" "$RES" "$RED_COLOR" "$*" "$RES"; }
+dim()  { printf '  %s%s%s\n' "$DIM" "$*" "$RES"; }
+
+step_head() { # step_head <当前> <总数> <标题> —— 步骤行 + 渐变进度条
+    local cur="$1" total="$2" title="$3"
+    printf '\n  %s▸%s %s%s%s   %s  %s[%s/%s]%s\n' \
+        "$(grad_esc "$((cur - 1))" "$total")" "$RES" "$BOLD" "$title" "$RES" \
+        "$(bar "$cur" "$total")" "$DIM" "$cur" "$total" "$RES"
+}
+
+banner() { # 顶部渐变标题（纯 ASCII 字形，宽度无歧义）
+    local -a art=(
+        '      ____  ____  _   _'
+        '     |  _ \/ ___|| | | |'
+        '     | | | \___ \| |_| |'
+        '     | |_| |___) |  _  |'
+        '     |____/|____/|_| |_|'
+    )
+    local i n=${#art[@]}
+    printf '\n'
+    for i in "${!art[@]}"; do
+        printf '%s%s%s\n' "$(grad_esc "$i" "$n")" "${art[$i]}" "$RES"
+    done
+    printf '  %s%sDeepSeek Harness%s  %s· Docker 一键部署 · Caddy HTTPS 前门 · 域名 / IP 开箱可用%s\n' \
+        "$BOLD" "$(grad_esc 2 5)" "" "$DIM" "$RES"
+    printf '  %s%s\n\n' "$(grad_esc 0 4)" "$(rule_grad 68)" "$RES"
+}
+
+spin() { # spin <说明> <命令...> —— 转圈 + 耗时；失败时打印输出尾部
+    local label="$1"; shift
+    local out rc=0 pid frame=0 start=$SECONDS elapsed
+    local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    out=$(mktemp 2>/dev/null || echo "/tmp/dsh-spin.$$")
+
+    if [ "$COLOR_LEVEL" -gt 0 ] && [ -t 1 ]; then
+        printf '\033[?25l'
+        ( "$@" ) >"$out" 2>&1 &
+        pid=$!
+        while kill -0 "$pid" 2>/dev/null; do
+            elapsed=$((SECONDS - start))
+            printf '\r  %s%s%s %s%s %s%ss%s\033[K' \
+                "$CYAN_COLOR" "${frames[$((frame % 10))]}" "$RES" "$label" "$DIM" "$elapsed" "$RES"
+            frame=$((frame + 1))
+            sleep 0.15
+        done
+        wait "$pid"; rc=$?
+        printf '\r\033[K\033[?25h'
+    else
+        printf '  %s→%s %s\n' "$CYAN_COLOR" "$RES" "$label"
+        "$@" >"$out" 2>&1; rc=$?
+    fi
+
+    elapsed=$((SECONDS - start))
+    if [ "$rc" -eq 0 ]; then
+        printf '  %s✔%s %s %s(%ss)%s\n' "$GREEN_COLOR" "$RES" "$label" "$DIM" "$elapsed" "$RES"
+    else
+        printf '  %s✖%s %s\n' "$RED_COLOR" "$RES" "$label"
+        tail -n 12 "$out" 2>/dev/null | sed 's/^/      /'
+    fi
+    rm -f "$out"
+    return "$rc"
+}
 
 confirm() { # confirm <提示> [默认值]
     local prompt="$1" def="${2:-n}" answer
@@ -805,25 +956,24 @@ EOF
 }
 
 PULL_IMAGE() {
-    echo -e "${GREEN_COLOR}拉取镜像 ${DSH_IMAGE}:${DSH_IMAGE_TAG} ...${RES}"
     if [ "${DSH_NO_MIRROR:-0}" = "1" ]; then
-        docker pull "${DSH_IMAGE}:${DSH_IMAGE_TAG}" || {
-            fail "拉取失败"
+        spin "拉取镜像 ${DSH_IMAGE}:${DSH_IMAGE_TAG}" docker pull "${DSH_IMAGE}:${DSH_IMAGE_TAG}" || {
+            fail "拉取失败，请检查网络或稍后重试"
             return 1
         }
         return 0
     fi
 
-    # 国内机器先试镜像加速，失败再直连
-    if docker pull "${DSH_IMAGE}:${DSH_IMAGE_TAG}"; then
+    if spin "拉取镜像 ${DSH_IMAGE}:${DSH_IMAGE_TAG}" docker pull "${DSH_IMAGE}:${DSH_IMAGE_TAG}"; then
         return 0
     fi
-    warn "直连拉取失败，尝试走镜像加速"
+
+    warn "直连拉取失败，尝试国内镜像加速"
     local mirror
     for mirror in docker.1ms.run dockerproxy.net docker.m.daocloud.io; do
-        if docker pull "${mirror}/${DSH_IMAGE}:${DSH_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${mirror}/${DSH_IMAGE}:${DSH_IMAGE_TAG}" "${DSH_IMAGE}:${DSH_IMAGE_TAG}"
-            ok "已通过镜像源拉取：$mirror"
+        if spin "经 $mirror 拉取" docker pull "${mirror}/${DSH_IMAGE}:${DSH_IMAGE_TAG}"; then
+            docker tag "${mirror}/${DSH_IMAGE}:${DSH_IMAGE_TAG}" "${DSH_IMAGE}:${DSH_IMAGE_TAG}" 2>/dev/null
+            ok "已通过镜像源拉取并重打标签：$mirror"
             return 0
         fi
     done
@@ -832,24 +982,28 @@ PULL_IMAGE() {
 }
 
 WAIT_HEALTHY() {
-    local waited=0 health
-    echo -e "${GREEN_COLOR}等待容器就绪...${RES}"
+    local waited=0 health start=$SECONDS spinner=0
     while [ "$waited" -lt 120 ]; do
         health=$(container_health)
-        [ "$health" = "healthy" ] && { ok "容器状态：healthy"; return 0; }
-        case "$health" in
-            unhealthy)
-                fail "容器不健康，最近日志："
-                docker logs --tail 25 "$DSH_CONTAINER_NAME" 2>&1 | sed 's/^/    /'
-                return 1
-                ;;
-        esac
+        if [ "$health" = "healthy" ]; then
+            [ "$COLOR_LEVEL" -gt 0 ] && [ -t 1 ] && printf '\r\033[K'
+            ok "容器就绪：healthy（$((SECONDS - start))s）"
+            return 0
+        fi
+        if [ "$health" = "unhealthy" ]; then
+            [ "$COLOR_LEVEL" -gt 0 ] && [ -t 1 ] && printf '\r\033[K'
+            fail "容器不健康，最近日志："
+            docker logs --tail 25 "$DSH_CONTAINER_NAME" 2>&1 | sed 's/^/      /'
+            return 1
+        fi
+        if [ "$COLOR_LEVEL" -gt 0 ] && [ -t 1 ]; then
+            printf '\r  %s◌%s 等待容器就绪 %s%ss%s\033[K' "$CYAN_COLOR" "$RES" "$DIM" "$((SECONDS - start))" "$RES"
+        fi
         sleep 3
         waited=$((waited + 3))
-        printf '\r  %s已等待 %ss%s' "$YELLOW_COLOR" "$waited" "$RES"
     done
-    printf '\n'
-    warn "等待超时，容器还没报告健康（可能还在初始化），可执行 dsh-harness logs 查看"
+    [ "$COLOR_LEVEL" -gt 0 ] && [ -t 1 ] && printf '\r\033[K'
+    warn "等待超时，容器还没报告健康（可能仍在初始化），可执行 dsh-harness logs 查看"
     return 1
 }
 
@@ -878,16 +1032,26 @@ CHECK() {
 # ─────────────────────────────── 安装 ───────────────────────────────
 
 INSTALL() {
+    local total=6
+    step_head 1 "$total" "环境与 Docker"
     check_docker || return 1
+
+    step_head 2 "$total" "安装目录"
     CHECK || return 1
+
+    step_head 3 "$total" "配置向导"
     SELECT_ACCESS || return 1
+
+    step_head 4 "$total" "生成 docker-compose.yml 与 .env"
     WRITE_FILES || return 1
+
+    step_head 5 "$total" "拉取镜像"
     PULL_IMAGE || return 1
 
-    echo -e "${GREEN_COLOR}创建并启动容器...${RES}"
-    if ! docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
+    step_head 6 "$total" "启动容器"
+    if ! spin "创建并启动容器" docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
         fail "启动失败，最近日志："
-        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/    /'
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/      /'
         return 1
     fi
     WAIT_HEALTHY
@@ -896,44 +1060,21 @@ INSTALL() {
 
 SUCCESS() {
     clear_screen
-
-    local pub lan login_url
     load_env 2>/dev/null || true
-    pub=$(get_public_ip || true)
-    lan=$(get_local_ip || true)
-    login_url=$(token_url || true)
-    [ -n "$HTTPS_PORT" ] || HTTPS_PORT="$DEFAULT_HTTPS_PORT"
-    [ -n "$ACCESS_HOST" ] || ACCESS_HOST="${pub:-$lan}"
+    deploy_panel "✦ DeepSeek Harness 安装成功"
 
-    draw_box \
-        "DeepSeek Harness 安装成功！" \
-        "" \
-        "镜像信息：${DSH_IMAGE}:${DSH_IMAGE_TAG:-latest}" \
-        "" \
-        "访问地址：" \
-        "  公网：$([ "$TLS_MODE" = "acme" ] && echo "https://${ACCESS_HOST}/" || echo "https://${pub:-$ACCESS_HOST}:${HTTPS_PORT}/")" \
-        "  内网：$([ "$TLS_MODE" = "acme" ] && echo "https://${ACCESS_HOST}/" || echo "https://${lan:-$ACCESS_HOST}:${HTTPS_PORT}/")" \
-        "" \
-        "证书模式：$([ "$TLS_MODE" = "acme" ] && echo "Let's Encrypt（acme）" || echo "自签（internal，浏览器提示一次风险）")" \
-        "数据目录：$INSTALL_PATH" \
-        "认证方式：dsh 自带 token（无额外账号密码）" \
-        "" \
-        "首次登录（打开一次即可换持久 cookie）：" \
-        "  ${login_url:-稍后执行 dsh-harness url 获取}"
-
-    # 安装命令行工具
     if ! INSTALL_CLI; then
-        warn "命令行工具安装失败，但不影响使用（可用完整路径 $MANAGER_PATH）"
+        warn "命令行工具安装失败，但不影响使用（完整路径 $MANAGER_PATH）"
     fi
-
-    echo -e "\n管理: 在任意目录输入 ${GREEN_COLOR}dsh-harness${RES} 打开管理菜单"
-    echo -e "常用: ${GREEN_COLOR}dsh-harness status | url | logs | update${RES}"
     echo
-    warn "如果端口无法访问，请检查服务器安全组、防火墙和服务状态"
+    info "管理：在任意目录输入 ${BOLD}dsh-harness${RES} 打开管理菜单"
+    info "常用：dsh-harness status | url | logs | update | backup"
+    warn "端口打不开先查云厂商安全组 / 防火墙是否放行"
     echo
     if [ "${DSH_KEEP_SHELL:-0}" != "1" ]; then
         exit 0
     fi
+    return 0
 }
 
 # ─────────────────────────────── 更新 ───────────────────────────────
@@ -946,43 +1087,39 @@ UPDATE() {
     check_docker || return 1
     load_env 2>/dev/null || true
 
-    echo -e "${GREEN_COLOR}开始更新 DeepSeek Harness ...${RES}"
-
-    # 读取当前 / 最新镜像摘要，判断是否需要更新
-    local need_pull=0
-    if [ "${DSH_NO_PULL:-0}" = "1" ]; then
-        need_pull=0
-    else
+    # 已是最新摘要则直接跳过（docker manifest 查不到就不判断，照常更新）
+    if [ "${DSH_NO_PULL:-0}" != "1" ]; then
         local remote_digest local_digest
         remote_digest=$(docker manifest inspect "${DSH_IMAGE}:${DSH_IMAGE_TAG}" 2>/dev/null | grep -m1 '"digest"' | sed 's/.*"digest": *"\([^"]*\)".*/\1/')
         local_digest=$(docker image inspect "${DSH_IMAGE}:${DSH_IMAGE_TAG}" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//')
         if [ -n "$remote_digest" ] && [ "$remote_digest" = "$local_digest" ]; then
-            ok "当前已是最新镜像（${DSH_IMAGE_TAG}，${local_digest:0:19}…），无需更新"
+            deploy_panel "✦ 已是最新镜像（${DSH_IMAGE_TAG}）"
+            echo
             return 0
         fi
-        need_pull=1
     fi
 
     if ! confirm "拉取最新镜像并重建容器？（数据保留）" y; then
-        echo -e "${YELLOW_COLOR}已取消${RES}"
+        dim "已取消"
         return 0
     fi
 
-    if [ "$need_pull" = "1" ]; then
-        PULL_IMAGE || {
-            fail "更新终止：镜像拉取失败"
-            return 1
-        }
-    fi
-
-    echo -e "${GREEN_COLOR}重建容器...${RES}"
-    if ! docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
+    local total=3
+    step_head 1 "$total" "拉取镜像"
+    PULL_IMAGE || {
+        fail "更新终止：镜像拉取失败"
+        return 1
+    }
+    step_head 2 "$total" "重建容器"
+    if ! spin "重建容器" docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
         fail "更新失败，最近日志："
-        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/    /'
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/      /'
         return 1
     fi
+    step_head 3 "$total" "等待就绪"
     WAIT_HEALTHY
-    deploy_result "更新完成！"
+    deploy_panel "✦ 更新完成"
+    echo
 }
 
 RECONFIG() {
@@ -992,19 +1129,25 @@ RECONFIG() {
     }
     check_docker || return 1
     load_env 2>/dev/null || true
-    echo -e "${GREEN_COLOR}重新配置会重写 .env 与 compose，并重建容器（数据保留）${RES}"
+    dim "重新配置会重写 .env 与 compose，并重建容器（数据保留）"
 
-    # 允许重新选择访问方式
-    ACCESS_HOST=""
+    ACCESS_HOST=""          # 重新走一遍访问方式选择
+    local total=4
+    step_head 1 "$total" "配置向导"
     SELECT_ACCESS || return 1
+    step_head 2 "$total" "写入配置"
     WRITE_FILES || return 1
+    step_head 3 "$total" "拉取镜像"
     PULL_IMAGE || return 1
-    if ! docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
-        fail "重建失败"
+    step_head 4 "$total" "重建容器"
+    if ! spin "重建容器" docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
+        fail "重建失败，最近日志："
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/      /'
         return 1
     fi
     WAIT_HEALTHY
-    deploy_result "重新配置完成！"
+    deploy_panel "✦ 重新配置完成"
+    echo
 }
 
 STATUS() {
@@ -1169,29 +1312,29 @@ DOCKER_MENU() {
 
 SHOW_ABOUT() {
     clear_screen
-    draw_box \
-        "DeepSeek Harness Manage Script" \
+    banner
+    draw_box --title "✦ 关于本脚本" \
+        "DeepSeek Harness Manage Script   v1.0.0" \
+        "更新日期 2026-09-11" \
         "" \
-        "版本信息：" \
-        "  脚本版本: 1.0.0" \
-        "  更新日期: 2026-09-11" \
+        "✦ 组件" \
+        "   上游   @deepseek-ai/dsh（官方 Web UI）" \
+        "   镜像   dockorae/deepseek-harness" \
+        "   仓库   https://github.com/MinimaxFlora/deepseek-harness" \
+        "   前门   容器内 Caddy：域名走 Let's Encrypt，IP 走内部 CA 自签" \
         "" \
-        "DeepSeek Harness：" \
-        "  上游包  : @deepseek-ai/dsh" \
-        "  镜像    : dockorae/deepseek-harness" \
-        "  仓库    : https://github.com/MinimaxFlora/deepseek-harness" \
+        "✦ 认证" \
+        "   dsh 自带「进程 token + 持久 cookie」，本脚本不引入 Basic Auth" \
         "" \
-        "作者信息：" \
-        "  维护: MinimaxFlora" \
+        "✦ 支持的访问方式" \
+        "   IP 模式    映射 8443（可改），自签证书，首次部署默认探测公网 IP" \
+        "   域名模式   映射 80 + 443，Caddy 自动申请并续期真证书" \
+        "   两者可随时用菜单「切换访问方式」互切（数据保留）" \
         "" \
-        "许可证：" \
-        "  MIT License" \
-        "" \
-        "支持平台：" \
-        "  架构: x86_64（arm64 需自行构建镜像）" \
-        "  系统: Linux + Docker（不限 init）"
+        "✦ 许可证" \
+        "   MIT License"
     echo
-    echo -e "${YELLOW_COLOR}感谢使用 DeepSeek Harness 管理脚本！${RES}"
+    printf '  %s维护：MinimaxFlora  ·  上游作者：DeepSeek%s\n' "$DIM" "$RES"
     echo
 }
 
@@ -1241,80 +1384,280 @@ INSTALL_CLI() {
 }
 
 # 部署完成后的成框信息（更新 / 重新配置也用它）
-deploy_result() {
-    local title="$1" pub lan login_url
+deploy_panel() { # deploy_panel <标题> —— 成框部署信息：地址 / 登录链接 / 认证证书 / 数据与命令
+    local title="${1:-✦ 部署完成}" pub lan login_url size avail cert
     load_env 2>/dev/null || true
+    [ -n "$HTTPS_PORT" ] || HTTPS_PORT="$DEFAULT_HTTPS_PORT"
+    [ -n "$ACCESS_HOST" ] || ACCESS_HOST="$(get_public_ip || get_local_ip || true)"
     pub=$(get_public_ip || true)
     lan=$(get_local_ip || true)
     login_url=$(token_url || true)
+    size=$(du -sh "$INSTALL_PATH/data" 2>/dev/null | awk '{print $1}')
+    avail=$(df -h "$INSTALL_PATH" 2>/dev/null | awk 'NR==2 {print $4" 可用"}')
+    if [ "$TLS_MODE" = "acme" ]; then
+        cert="Let's Encrypt（Caddy 自动申请 / 续期）"
+    else
+        cert="自签（容器内部 CA，浏览器提示一次风险）"
+    fi
+
+    local -a b=()
+    b+=("✦ 访问地址")
+    if [ "$TLS_MODE" = "acme" ]; then
+        b+=("     https://${ACCESS_HOST}/")
+    else
+        [ -n "$lan" ] && b+=("   内网  https://${lan}:${HTTPS_PORT}/")
+        b+=("   公网  https://${pub:-$ACCESS_HOST}:${HTTPS_PORT}/")
+    fi
+    b+=("")
+    b+=("✦ 首次登录链接")
+    b+=("     ${login_url:-稍后执行 dsh-harness url 获取}")
+    b+=("")
+    b+=("✦ 认证与证书")
+    b+=("   认证  dsh 自带 token + cookie（无需额外账号密码）")
+    b+=("   证书  ${cert}")
+    b+=("   镜像  ${DSH_IMAGE}:${DSH_IMAGE_TAG:-latest}")
+    b+=("")
+    b+=("✦ 数据与命令")
+    b+=("   目录  ${INSTALL_PATH}/data${size:+（已用 ${size}${avail:+，磁盘 ${avail}}）}")
+    b+=("   命令  dsh-harness  ← 菜单 / 状态 / 日志 / 更新 / 备份")
+
     echo
-    draw_box \
-        "$title" \
-        "" \
-        "镜像信息：${DSH_IMAGE}:${DSH_IMAGE_TAG:-latest}" \
-        "" \
-        "访问地址：" \
-        "  公网：$([ "$TLS_MODE" = "acme" ] && echo "https://${ACCESS_HOST}/" || echo "https://${pub:-$ACCESS_HOST}:${HTTPS_PORT}/")" \
-        "  内网：$([ "$TLS_MODE" = "acme" ] && echo "https://${ACCESS_HOST}/" || echo "https://${lan:-$ACCESS_HOST}:${HTTPS_PORT}/")" \
-        "" \
-        "首次登录（打开一次即可换持久 cookie）：" \
-        "  ${login_url:-稍后执行 dsh-harness url 获取}" \
-        "" \
-        "数据目录：$INSTALL_PATH"
+    draw_box --title "$title" "${b[@]}"
     echo
-    warn "如果端口无法访问，请检查服务器安全组、防火墙和服务状态"
-    echo
+    dim "带 token 的链接等于钥匙，不要外发；token 每次重启都会变。"
 }
+
+deploy_result() { deploy_panel "✦ $1"; }
 
 # ─────────────────────────────── 主菜单 ───────────────────────────────
 
-SHOW_MENU() {
-    echo -e "\n欢迎使用 DeepSeek Harness 管理脚本 \n"
-    echo -e "${GREEN_COLOR}基础功能：${RES}"
-    echo -e "${GREEN_COLOR}1${RES} - 安装 DeepSeek Harness"
-    echo -e "${GREEN_COLOR}2${RES} - 重新配置（域名 / 端口 / 镜像 tag）"
-    echo -e "${GREEN_COLOR}3${RES} - 更新镜像并重建"
-    echo -e "${GREEN_COLOR}4${RES} - 卸载 DeepSeek Harness"
-    echo -e "${GREEN_COLOR}-------------------${RES}"
-    echo -e "${GREEN_COLOR}服务管理：${RES}"
-    echo -e "${GREEN_COLOR}5${RES} - 查看运行状态"
-    echo -e "${GREEN_COLOR}6${RES} - 查看访问入口 / 登录链接"
-    echo -e "${GREEN_COLOR}7${RES} - 启动容器"
-    echo -e "${GREEN_COLOR}8${RES} - 停止容器"
-    echo -e "${GREEN_COLOR}9${RES} - 重启容器"
-    echo -e "${GREEN_COLOR}10${RES} - 查看日志"
-    echo -e "${GREEN_COLOR}-------------------${RES}"
-    echo -e "${GREEN_COLOR}配置管理：${RES}"
-    echo -e "${GREEN_COLOR}11${RES} - 备份数据"
-    echo -e "${GREEN_COLOR}12${RES} - 恢复数据"
-    echo -e "${GREEN_COLOR}-------------------${RES}"
-    echo -e "${GREEN_COLOR}高级选项：${RES}"
-    echo -e "${GREEN_COLOR}13${RES} - Docker 容器管理"
-    echo -e "${GREEN_COLOR}14${RES} - 定时更新镜像"
-    echo -e "${GREEN_COLOR}15${RES} - 系统状态"
-    echo -e "${GREEN_COLOR}16${RES} - 关于"
-    echo -e "${GREEN_COLOR}-------------------${RES}"
-    echo -e "${GREEN_COLOR}0${RES} - 退出脚本"
+menu_section() { # 菜单分组标题
+    printf '\n  %s▌%s %s%s%s\n' "$(grad_esc 0 2)" "$RES" "$BOLD" "$1" "$RES"
+}
+
+menu_item() { # menu_item <编号> <名称> [说明]
+    local num="$1" name="$2" note="${3:-}"
+    printf '   %s%2s%s  %s%s%s  %s%s%s\n' \
+        "$(grad_esc "$num" 18)" "$num" "$RES" \
+        "$BOLD" "$(pad "$name" 22)" "$RES" \
+        "$DIM" "$note" "$RES"
+}
+
+# ────────────────── 访问方式切换（IP ⇄ 域名，数据保留）──────────────────
+
+port_owner() { # port_owner <端口> → 占用者（没有则空）
+    local p=":$1"
+    ss -lntp 2>/dev/null | awk -v p="$p" '$4 ~ (p "$") {print $NF; exit}' && return 0
+    netstat -lntp 2>/dev/null | awk -v p="$p" '$4 ~ (p "$") {print $NF; exit}'
+}
+
+check_port_free() { # check_port_free <端口...> —— 有占用返回 1
+    local rc=0 p who
+    for p in "$@"; do
+        who=$(port_owner "$p")
+        if [ -n "$who" ]; then
+            fail "端口 $p 已被占用：$who"
+            rc=1
+        fi
+    done
+    [ "$rc" -eq 0 ] && ok "端口 $* 空闲"
+    return "$rc"
+}
+
+ADD_DOMAIN() { # ADD_DOMAIN [域名] [邮箱] —— 切到域名 + Let's Encrypt（按选择：IP 入口随之关闭）
+    local domain="${1:-}" email="${2:-}"
+    if [ -z "$domain" ]; then
+        read -r -p "请输入域名（如 dsh.example.com）: " domain
+    fi
+    domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%%/*}"
+    is_domain "$domain" || {
+        fail "域名格式不正确：$domain"
+        return 1
+    }
+
+    local pub dns_ip
+    pub=$(get_public_ip || true)
+    dns_ip=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$dns_ip" ]; then
+        warn "域名 $domain 暂时解析不到 A 记录，Caddy 申请证书会失败（先指向本机公网 IP ${pub:-?}）"
+    elif [ -n "$pub" ] && [ "$dns_ip" != "$pub" ]; then
+        warn "域名解析到 $dns_ip，而本机公网 IP 是 $pub —— 不一致时证书申请会失败"
+    else
+        ok "域名解析正常：$domain → $dns_ip"
+    fi
+
+    if [ -z "$email" ]; then
+        read -r -p "ACME 通知邮箱（可留空）: " email
+    fi
+
+    dim "切换后只保留域名入口（IP 地址不再提供服务），并且需要 80 / 443 对外可达"
+    if ! confirm "确认切换为域名访问？" y; then
+        dim "已取消"
+        return 0
+    fi
+
+    check_port_free 80 443 || {
+        fail "请先释放 80 / 443（占用者见上）再切换"
+        return 1
+    }
+
+    ACCESS_HOST="$domain"
+    ACME_EMAIL="${email:-$ACME_EMAIL}"
+    TLS_MODE="acme"
+    DEPLOY_MODE="domain"
+    HTTPS_PORT="$DEFAULT_HTTPS_PORT"
+
+    local total=3
+    step_head 1 "$total" "写入配置（80 / 443 + ACME）"
+    WRITE_FILES || return 1
+    step_head 2 "$total" "重建容器"
+    if ! spin "重建容器（域名 + Let's Encrypt）" docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
+        fail "重建失败，最近日志："
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/      /'
+        return 1
+    fi
+    step_head 3 "$total" "等待就绪（首次签发证书可能需要几秒）"
+    WAIT_HEALTHY
+    deploy_panel "✦ 已切换为域名访问（Let's Encrypt）"
     echo
-    read -r -p "请输入选项 [0-16]: " choice
+}
+
+SWITCH_TO_IP() { # SWITCH_TO_IP [地址] [端口] —— 切回 IP + 自签
+    local host="${1:-}" port="${2:-}" pub lan
+    pub=$(get_public_ip || true); lan=$(get_local_ip || true)
+
+    if [ -z "$host" ]; then
+        read -r -p "访问地址（默认公网 IP ${pub:-$lan}）: " host
+        host="${host:-${pub:-$lan}}"
+    fi
+    valid_host "$host" || return 1
+    if [ -z "$port" ]; then
+        read -r -p "HTTPS 端口（默认 $DEFAULT_HTTPS_PORT）: " port
+        port="${port:-$DEFAULT_HTTPS_PORT}"
+    fi
+    case "$port" in ''|*[!0-9]*) fail "端口必须是数字"; return 1 ;; esac
+
+    dim "切回 IP 模式后域名入口不再提供服务"
+    if ! confirm "确认切换为 IP 访问？" y; then
+        dim "已取消"
+        return 0
+    fi
+    check_port_free "$port" || {
+        fail "请先释放端口 $port 再切换"
+        return 1
+    }
+
+    ACCESS_HOST="$host"
+    TLS_MODE="internal"
+    DEPLOY_MODE="ip"
+    HTTPS_PORT="$port"
+
+    local total=3
+    step_head 1 "$total" "写入配置（$port + 自签）"
+    WRITE_FILES || return 1
+    step_head 2 "$total" "重建容器"
+    if ! spin "重建容器（IP + 自签证书）" docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d; then
+        fail "重建失败，最近日志："
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" logs --tail 30 2>&1 | sed 's/^/      /'
+        return 1
+    fi
+    step_head 3 "$total" "等待就绪"
+    WAIT_HEALTHY
+    deploy_panel "✦ 已切换为 IP 访问（自签证书）"
+    echo
+}
+
+SWITCH_ACCESS() { # 交互入口：先 IP 后加域名 / 也可切回 IP
+    [ -f "$MARKER_FILE" ] || {
+        fail "错误：系统未安装 DeepSeek Harness，请先安装！"
+        return 1
+    }
+    check_docker || return 1
+    load_env 2>/dev/null || true
+
+    echo -e "${CYAN_COLOR}切换访问方式${RES}"
+    if [ "$TLS_MODE" = "acme" ]; then
+        info "当前：域名模式 · https://${ACCESS_HOST}/"
+        echo -e "${GREEN_COLOR}1${RES} - 换一个域名（重新申请证书）"
+        echo -e "${GREEN_COLOR}2${RES} - 切回 IP 模式（自签证书）"
+        echo -e "${GREEN_COLOR}0${RES} - 返回主菜单"
+        echo
+        read -r -p "请输入选项 [0-2]: " choice
+        case "$choice" in
+            1) ADD_DOMAIN ;;
+            2) SWITCH_TO_IP ;;
+            0) ;;
+            *) fail "无效的选项" ;;
+        esac
+    else
+        info "当前：IP 模式 · $(entry_url)"
+        echo -e "${GREEN_COLOR}1${RES} - 添加域名并切到 Let's Encrypt（推荐，需域名解析 + 80/443 放行）"
+        echo -e "${GREEN_COLOR}2${RES} - 改 IP 地址 / 端口（仍是自签）"
+        echo -e "${GREEN_COLOR}0${RES} - 返回主菜单"
+        echo
+        read -r -p "请输入选项 [0-2]: " choice
+        case "$choice" in
+            1) ADD_DOMAIN ;;
+            2) SWITCH_TO_IP ;;
+            0) ;;
+            *) fail "无效的选项" ;;
+        esac
+    fi
+    return 0
+}
+
+SHOW_MENU() {
+    banner
+    printf '  %s输入编号后回车，菜单随时可用 dsh-harness 调出%s\n' "$DIM" "$RES"
+
+    menu_section "基础功能"
+    menu_item 1  "安装 DeepSeek Harness" "域名 / IP 向导式部署"
+    menu_item 2  "切换访问方式" "IP ⇄ 域名（后加域名走这里）"
+    menu_item 3  "重新配置" "端口 / 镜像 tag"
+    menu_item 4  "更新镜像并重建" "数据保留"
+    menu_item 5  "卸载" "数据可选保留"
+
+    menu_section "服务管理"
+    menu_item 6  "查看运行状态" "容器健康 + 访问入口"
+    menu_item 7  "访问入口 / 登录链接" "带 token，打开一次即可"
+    menu_item 8  "启动容器"
+    menu_item 9  "停止容器"
+    menu_item 10 "重启容器"
+    menu_item 11 "查看日志" "Ctrl+C 退出"
+
+    menu_section "配置管理"
+    menu_item 12 "备份数据" "data + .env + compose"
+    menu_item 13 "恢复数据" "默认取最新备份"
+
+    menu_section "高级选项"
+    menu_item 14 "Docker 容器管理" "状态 / 进容器 / 启停 / 删除"
+    menu_item 15 "定时更新镜像" "写入 crontab"
+    menu_item 16 "系统状态" "容器 / 端口 / 磁盘 / 内存"
+    menu_item 17 "关于"
+    menu_item 0  "退出脚本"
+    echo
+    printf '  %s请输入选项 [0-17]:%s ' "$BOLD" "$RES"
+    read -r choice || { printf '\n'; return 0; }   # stdin 到 EOF（自动化/管道）直接返回，避免空转
+    case "$choice" in "") printf '\n'; return 0 ;; esac
 
     case "$choice" in
         1)  DSH_KEEP_SHELL=1; INSTALL && SUCCESS ;;
-        2)  RECONFIG ;;
-        3)  UPDATE ;;
-        4)  UNINSTALL ;;
-        5)  STATUS ;;
-        6)  SHOW_URL ;;
-        7)  SERVICE_ACTION start ;;
-        8)  SERVICE_ACTION stop ;;
-        9)  SERVICE_ACTION restart ;;
-        10) LOGS ;;
-        11) backup_config ;;
-        12) restore_config ;;
-        13) DOCKER_MENU ;;
-        14) setup_auto_update ;;
-        15) check_system_status ;;
-        16) SHOW_ABOUT ;;
+        2)  SWITCH_ACCESS ;;
+        3)  RECONFIG ;;
+        4)  UPDATE ;;
+        5)  UNINSTALL ;;
+        6)  STATUS ;;
+        7)  SHOW_URL ;;
+        8)  SERVICE_ACTION start ;;
+        9)  SERVICE_ACTION stop ;;
+        10) SERVICE_ACTION restart ;;
+        11) LOGS ;;
+        12) backup_config ;;
+        13) restore_config ;;
+        14) DOCKER_MENU ;;
+        15) setup_auto_update ;;
+        16) check_system_status ;;
+        17) SHOW_ABOUT ;;
         0)  exit 0 ;;
         *)  fail "无效的选项" ;;
     esac
@@ -1326,7 +1669,7 @@ if [ $# -eq 0 ]; then
     while true; do
         SHOW_MENU
         echo
-        read -r -s -n1 -p "按任意键继续 ... "
+        read -r -s -n1 -p "按任意键继续 ... " || { echo; exit 0; }
         clear_screen
     done
 elif [ "$1" = "install" ]; then
@@ -1339,6 +1682,14 @@ elif [ "$1" = "uninstall" ]; then
     UNINSTALL
 elif [ "$1" = "config" ]; then
     RECONFIG
+elif [ "$1" = "switch" ]; then
+    SWITCH_ACCESS
+elif [ "$1" = "domain" ]; then
+    load_env 2>/dev/null || true
+    ADD_DOMAIN "${2:-}" "${3:-}"
+elif [ "$1" = "ip" ]; then
+    load_env 2>/dev/null || true
+    SWITCH_TO_IP "${2:-}" "${3:-}"
 elif [ "$1" = "status" ]; then
     STATUS
 elif [ "$1" = "url" ]; then
@@ -1368,6 +1719,9 @@ DeepSeek Harness Manage Script v1.0.0
   $0 update                 拉取最新镜像并重建（数据保留）
   $0 uninstall              卸载（数据可选择保留）
   $0 config                 重新配置（域名 / 端口 / 镜像 tag）
+  $0 switch                 交互式切换访问方式（IP ⇄ 域名）
+  $0 domain <域名> [邮箱]    切到域名访问：Caddy 申请 Let's Encrypt，映射 80/443
+  $0 ip [地址] [端口]        切回 IP 访问：自签证书（端口默认 8443）
   $0 status                 运行状态
   $0 url                    访问入口 + 首次登录链接
   $0 logs                   实时日志
@@ -1386,6 +1740,8 @@ DeepSeek Harness Manage Script v1.0.0
   DSH_INSTALL_DIR   安装目录，默认 $DEFAULT_INSTALL_PATH
   DSH_NETWORK       复用已有 docker 网络时的网络名
   DSH_NO_MIRROR=1   强制直连拉镜像
+  DSH_COLOR_LEVEL   0/1/2/3 强制颜色能力（测试用；0 = 无颜色）
+  NO_COLOR=1        关闭颜色（遵循 NO_COLOR 约定）
   DSH_YES=1         所有确认自动回答 yes（定时更新任务用）
   DSH_FORCE=1       已安装时直接覆盖重装，不再询问
 

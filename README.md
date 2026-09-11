@@ -37,13 +37,21 @@ sudo bash install.sh
 
 脚本采用 OpenList 管理脚本那套结构：**数字菜单 + 子命令 + `--help`**。
 
+界面是 24bit 渐变主题（DeepSeek 蓝 → 青 → 绿）：渐变 ASCII 标题、渐变边框圆角面板、
+`▸ [n/6]` 步骤条 + 渐变进度条、拉镜像/重建时的转圈动画。终端不支持真彩时自动降级到
+256 色 / 8 色；`NO_COLOR=1`、`TERM=dumb`、输出重定向（日志、CI）时**完全无色**，
+`DSH_COLOR_LEVEL=0..3` 可强制指定。
+
 ```sh
-dsh-harness                        # 交互菜单（0-16）
+dsh-harness                        # 交互菜单（0-17）
 dsh-harness install [安装路径]      # 安装（默认 /opt/deepseek-harness）
+dsh-harness switch                 # 切换访问方式：IP ⇄ 域名（数据保留）
+dsh-harness domain <域名> [邮箱]    # 切到域名：Caddy 申请 Let's Encrypt，占用 80/443
+dsh-harness ip [地址] [端口]        # 切回 IP：自签证书，端口默认 8443
 dsh-harness status                 # 运行状态 + 访问入口
 dsh-harness url                    # 访问入口 + 首次登录链接（按实际部署地址拼）
 dsh-harness logs                   # 实时日志（Ctrl+C 退出）
-dsh-harness config                 # 重新配置（域名 / 端口 / 镜像 tag）并重建
+dsh-harness config                 # 重新配置（端口 / 镜像 tag）并重建
 dsh-harness update                 # 拉最新镜像并重建（摘要相同会跳过）
 dsh-harness start|stop|restart     # 容器启停
 dsh-harness backup|restore         # 数据 + 配置打包 / 恢复（默认取最新一份）
@@ -53,6 +61,10 @@ dsh-harness about | --help         # 关于 / 全部命令与可用环境变量
 
 菜单里另有：Docker 容器管理（状态 / 进容器 / 启停 / 删除）、定时更新镜像（写 crontab）、
 系统状态（容器 / 端口 / 磁盘 / 内存 / Docker）。
+
+> **先按 IP 装、以后再上域名**：不用重装。`dsh-harness switch`（或菜单 2）会检查 80/443
+> 是否空闲、核对域名解析是否指向本机公网 IP，然后改配置重建容器 —— 数据完全保留。
+> 切到域名后按设计**只保留域名入口**，IP 地址不再提供服务；想切回去用 `dsh-harness ip`。
 
 **域名还是 IP？**
 
